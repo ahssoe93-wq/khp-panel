@@ -23,7 +23,8 @@
 </div>
 <div class="chips" id="sort-chips">
   <span class="muted small" style="align-self:center">Sort:</span>
-  <button type="button" class="chip-btn sel" data-sort="expiry">Expiry ↓</button>
+  <button type="button" class="chip-btn sel" data-sort="newest">Newest</button>
+  <button type="button" class="chip-btn" data-sort="expiry">Expiry ↓</button>
   <button type="button" class="chip-btn" data-sort="usage">Usage</button>
   <button type="button" class="chip-btn" data-sort="name">Name</button>
 </div>
@@ -49,6 +50,11 @@
         <button type="button" data-m="2">2 mo • 1000 GB</button>
         <button type="button" data-m="3">3 mo • 1500 GB</button>
       </div>
+      <label>Custom GB</label>
+      <input id="add-gb" type="number" min="1" step="1" placeholder="e.g. 750 — overrides the preset above">
+      <label>Custom expiry date</label>
+      <input id="add-date" type="date">
+      <p class="muted small">Leave both blank to use the preset. A custom date also sets the key name's date.</p>
       <div style="height:16px"></div>
       <button class="btn block" id="add-submit" onclick="submitAddKey()">Create key</button>
       <div style="height:10px"></div>
