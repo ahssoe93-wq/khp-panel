@@ -866,6 +866,12 @@ function initDashboardSmart() {
       if (q && snap.q) q.value = snap.q;
       const sf = document.getElementById('server-filter');
       if (sf && snap.sf) sf.value = snap.sf;
+      // v5.1: re-render the restored view from the restored state at once
+      // — a snapshot saved by older code shows expanded groups, while the
+      // restored EXPANDED set says collapsed; without this the old view
+      // flashed for a second until the quiet refresh re-rendered it.
+      renderServers();
+      renderExpiring();
     }
     initDashboardQuiet();
   } else {
