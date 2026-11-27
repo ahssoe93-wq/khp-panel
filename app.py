@@ -13,12 +13,15 @@ First run: open the page, set the admin password on the setup screen.
 For automated testing only, KHP_PANEL_ADMIN_PASSWORD env var sets the
 admin password on first run — do NOT use it in production.
 """
+import base64
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
@@ -719,12 +722,43 @@ def api_edit_key(server_id, name):
                     "gb": int((rec.get("limit") or 0) // 1073741824)})
 
 
+def _parse_ss_link(q):
+    """Parse a pasted ss:// key link -> (name, password); either may be None.
+    Handles both fragment styles: this panel's own `#<name>` and the
+    3X-UI panel's `#Outline-<name>-<GB>GB...` style. The password (from
+    the base64 userinfo) identifies the key exactly; the name is the
+    fallback. Returns (None, None) when q is not an ss:// link."""
+    s = (q or "").strip()
+    if not s.lower().startswith("ss://"):
+        return None, None
+    rest = s[5:]
+    password = None
+    if "@" in rest:
+        userinfo = rest.split("@", 1)[0].split("?", 1)[0].split("#", 1)[0]
+        try:
+            padded = userinfo + "=" * (-len(userinfo) % 4)
+            decoded = base64.b64decode(padded).decode("utf-8", "replace")
+            if ":" in decoded:
+                password = decoded.split(":", 1)[1] or None
+        except Exception:  # noqa: BLE001 - malformed link: fall back to name
+            password = None
+    name = None
+    if "#" in s:
+        frag = urllib.parse.unquote(s.split("#", 1)[1].strip())
+        m = re.match(r"^Outline-(.+)-\d+GB", frag)
+        name = m.group(1) if m else (frag or None)
+    return name, password
+
+
 @app.route("/api/search")
 @login_required
 def api_search():
-    q = (request.args.get("q") or "").strip().lower()
-    if len(q) < 2:
+    q_raw = (request.args.get("q") or "").strip()
+    if len(q_raw) < 2:
         return jsonify({"ok": True, "results": []})
+    # Pasted a whole key link? Match by its name or its password.
+    link_name, link_pw = _parse_ss_link(q_raw)
+    q = q_raw.lower()
     results = []
     for s in list_servers():
         full = get_server(s["id"])
@@ -734,7 +768,13 @@ def api_search():
             continue
         created = created_map(s["id"])
         for c in clients:
-            if q in c["name"].lower():
+            if link_name is not None or link_pw is not None:
+                hit = ((link_name and c["name"].lower() == link_name.lower())
+                       or (link_pw and c.get("password")
+                           and c["password"] == link_pw))
+            else:
+                hit = q in c["name"].lower()
+            if hit:
                 pc = public_client(s["id"], c, created.get(c["name"]))
                 pc["server_name"] = s["name"]
                 pc["server_type"] = s["type"]
