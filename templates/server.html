@@ -3,7 +3,7 @@
 {% set nav='servers' %}
 {% block title %}{{ server.name }} — KHP Panel{% endblock %}
 {% block content %}
-<p class="back-link"><a href="{{ url_for('dashboard') }}" onclick="return navTab(this, event)">← All servers</a></p>
+<p class="back-link"><a href="{{ url_for('dashboard') }}" onclick="return navTab(this, event)"><svg class="back-arrow" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#38BDF8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5 L8 12 L15 19"/></svg><span>All servers</span></a></p>
 <div class="card">
   <div class="row">
     <div class="flag">{{ flag(server.country) }}</div>
