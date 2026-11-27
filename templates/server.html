@@ -37,6 +37,14 @@
 <div class="muted small" id="page-info" style="margin:6px 2px 10px"></div>
 <button class="btn ghost block" id="load-more" style="display:none" onclick="loadMoreClients()">Load more ▼</button>
 
+{# v6: VLESS keys (3X-UI only, when the server has a VLESS inbound) —
+   a separate section, never mixed with the Outline keys above. #}
+<div id="vless-section" style="display:none">
+  <h2 class="sec sec-vless" style="margin-top:22px">VLESS keys</h2>
+  <div id="vless-list"><div class="spin">Loading…</div></div>
+  <div class="muted small" id="vless-info" style="margin:6px 2px 10px"></div>
+</div>
+
 <div class="modal-back" id="add-modal">
   <div class="modal">
     <h3>Add key — {{ server.name }}</h3>
@@ -44,6 +52,13 @@
       <label>Customer name</label>
       <input id="add-name" placeholder="e.g. MgBhone" autocomplete="off">
       <p class="muted small">The key name is made automatically: Name__D_M_YYYY (expiry date).</p>
+      <div id="add-proto-wrap" style="display:none">
+        <label>Key type</label>
+        <div class="seg" id="add-proto">
+          <button type="button" data-p="outline" class="sel">Outline</button>
+          <button type="button" data-p="vless">VLESS</button>
+        </div>
+      </div>
       <label>Months</label>
       <div class="seg" id="add-months">
         <button type="button" data-m="1" class="sel">1 mo • 400 GB</button>
@@ -64,6 +79,11 @@
       <p class="muted">Key created: <b id="add-result-name" style="color:var(--text)"></b></p>
       <div class="linkbox" id="add-result-link"></div>
       <button class="btn block" onclick="copyText(document.getElementById('add-result-link').textContent, 'Link copied')">Copy link</button>
+      <div id="add-result-xhttp-wrap" style="display:none">
+        <p class="muted small" style="margin-top:10px">XHTTP link (port 2087):</p>
+        <div class="linkbox" id="add-result-xhttp"></div>
+        <button class="btn block" onclick="copyText(document.getElementById('add-result-xhttp').textContent, 'XHTTP link copied')">Copy XHTTP link</button>
+      </div>
       <div style="height:10px"></div>
       <button class="btn ghost block" onclick="closeAddKey()">Done</button>
     </div>
@@ -74,8 +94,10 @@
 <script>
 const SERVER_ID = {{ server.id }};
 let ALL_CLIENTS = [];
+let ALL_VLESS = []; // v6: VLESS keys (3X-UI only), separate from Outline
+let HAS_VLESS = false;
 loadServerPage();
-document.getElementById('client-filter').addEventListener('input', () => { SHOWN = PAGE_SIZE; renderClients(); });
+document.getElementById('client-filter').addEventListener('input', () => { SHOWN = PAGE_SIZE; renderClients(); renderVlessClients(); });
 document.querySelectorAll('#sort-chips .chip-btn').forEach(b => b.addEventListener('click', () => {
   document.querySelectorAll('#sort-chips .chip-btn').forEach(x => x.classList.remove('sel'));
   b.classList.add('sel');
@@ -92,6 +114,10 @@ document.querySelectorAll('#filter-chips .chip-btn').forEach(b => b.addEventList
 }));
 document.querySelectorAll('#add-months button').forEach(b => b.addEventListener('click', () => {
   document.querySelectorAll('#add-months button').forEach(x => x.classList.remove('sel'));
+  b.classList.add('sel');
+}));
+document.querySelectorAll('#add-proto button').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('#add-proto button').forEach(x => x.classList.remove('sel'));
   b.classList.add('sel');
 }));
 if (location.hash === '#add') openAddKey();
