@@ -10,7 +10,10 @@
 <header>
   <img class="logo-img" src="{{ url_for('static', filename='logo.png') }}" alt="KHP">
   <div>
-    <h1>KHP PANEL</h1>
+    {# v6: the header shows the logged-in user's display name — the
+       Super Admin sees "KHP PANEL", resellers see their channel name.
+       Logged out (the shared login page) it says "KHP FAMILY PANEL". #}
+    <h1>{{ session.get('display_name') or 'KHP FAMILY PANEL' }}</h1>
     <div class="sub">Own VPN Panel</div>
   </div>
   <div class="spacer"></div>
@@ -25,7 +28,10 @@
 <nav class="bottom">
   <a href="{{ url_for('dashboard') }}" data-tab="servers" onclick="return navTab(this, event)" class="nav-servers {{ 'on' if nav=='servers' else '' }}">Servers</a>
   <a href="{{ url_for('dashboard') }}#search" data-tab="search" onclick="return navTab(this, event)" class="nav-search {{ 'on' if nav=='search' else '' }}">Search</a>
+  {# v6: Settings (servers + users + import) is Super Admin only — resellers get a 403 there, so the tab is hidden for them. #}
+  {% if session.get('role') == 'admin' %}
   <a href="{{ url_for('settings') }}" data-tab="settings" onclick="return navTab(this, event)" class="nav-settings {{ 'on' if nav=='settings' else '' }}">Settings</a>
+  {% endif %}
 </nav>
 {% endif %}
 <div id="toast"></div>
@@ -39,6 +45,13 @@
       <div class="linkbox" id="action-result-link" style="display:none"></div>
       <button class="btn block" id="action-copy-btn" style="display:none"
         onclick="copyText(document.getElementById('action-result-link').textContent, 'Link copied')">Copy link</button>
+      {# v6: VLESS results show a second link (XHTTP) with its own copy button #}
+      <div id="action-result-link2-wrap" style="display:none">
+        <p class="muted small" style="margin-top:10px">XHTTP link (port 2087):</p>
+        <div class="linkbox" id="action-result-link2"></div>
+        <button class="btn block" id="action-copy-btn2"
+          onclick="copyText(document.getElementById('action-result-link2').textContent, 'XHTTP link copied')">Copy XHTTP link</button>
+      </div>
       <div style="height:10px"></div>
       <button class="btn ghost block" onclick="closeActionModal()">Done</button>
     </div>
