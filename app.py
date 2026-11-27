@@ -1108,7 +1108,14 @@ def api_key_overview():
     """One parallel scan of all visible servers computing the dashboard
     stats + the three key lists in a single pass (replaces the old
     7-day /api/expiring scan for the dashboard):
-      stats: active keys, keys expiring within 3 days, expired keys.
+      stats: active keys, keys expiring within 3 days, expired keys
+        (TRUE totals across all visible servers — feeds the 4 stat cards).
+      by_owner: owner -> {totals, expiring, low_gb, expired} — the same
+        three lists SCOPED to one owner (the Super Admin's own servers,
+        or one reseller's servers). The dashboard renders the three
+        sections inside each owner/channel group from its own bucket, so
+        a section header count is that owner's TRUE total and agrees
+        with the stat cards; each list is capped at 100 rows.
       expiring: not expired, expiry within 3 days (soonest first).
       low_gb: not expired, 0 < remaining <= 10 GB (least remaining first).
       expired: expiry passed OR used >= limit (most recently expired
@@ -1116,8 +1123,8 @@ def api_key_overview():
     Classification (per the user's rules):
       expired = (expiry and expiry <= now) OR (limit and used >= limit)
       active  = enable AND expiry in the future AND used < limit
-    Lists are capped at 100 rows each; the stats counts are the TRUE
-    totals, not the capped lengths."""
+    Lists are capped at 100 rows each; the stats/totals counts are the
+    TRUE totals, not the capped lengths."""
     now = time.time()
     cache = OVERVIEW_CACHE.get(owner_key())
     if cache and now - cache[0] < 60:
@@ -1131,13 +1138,19 @@ def api_key_overview():
         except Exception:  # noqa: BLE001
             return []
 
+    def bucket(buckets, owner):
+        return buckets.setdefault(
+            owner, {"n_expiring": 0, "n_low": 0, "n_expired": 0,
+                    "expiring": [], "low_gb": [], "expired": []})
+
     active = 0
     total = 0
     n_expiring = n_low = n_expired = 0
-    expiring, low_gb, expired = [], [], []
+    buckets = {}
     with ThreadPoolExecutor(max_workers=6) as pool:
         for full, clients in zip(servers, pool.map(scan, servers)):
             created = created_maps[full["id"]]
+            b = bucket(buckets, full["owner"])
             for c in clients:
                 total += 1
                 exp = c.get("expiry") or 0
@@ -1148,41 +1161,50 @@ def api_key_overview():
                                   (limit and used >= limit))
                 if is_expired:
                     n_expired += 1
+                    b["n_expired"] += 1
                     pc = public_client(full["id"], c,
                                        created.get(c["name"]))
                     pc["server_name"] = full["name"]
                     pc["expired_reason"] = ("date" if exp and exp <= now
                                             else "gb")
-                    expired.append(pc)
+                    b["expired"].append(pc)
                     continue
                 if enable and (not exp or exp > now) and \
                         (not limit or used < limit):
                     active += 1
                 if exp and now < exp <= now + 3 * 86400:
                     n_expiring += 1
+                    b["n_expiring"] += 1
                     pc = public_client(full["id"], c,
                                        created.get(c["name"]))
                     pc["server_name"] = full["name"]
                     pc["days_left"] = max(0, int((exp - now) // 86400))
-                    expiring.append(pc)
+                    b["expiring"].append(pc)
                 if limit and 0 < (limit - used) <= LOW_GB_BYTES:
                     n_low += 1
+                    b["n_low"] += 1
                     pc = public_client(full["id"], c,
                                        created.get(c["name"]))
                     pc["server_name"] = full["name"]
                     pc["remaining"] = limit - used
                     pc["remaining_h"] = fmt_gb(limit - used)
-                    low_gb.append(pc)
-    expiring.sort(key=lambda r: r["expiry"])
-    low_gb.sort(key=lambda r: r["remaining"])
-    expired.sort(key=lambda r: r["expiry"], reverse=True)
+                    b["low_gb"].append(pc)
+    by_owner = {}
+    for owner, b in buckets.items():
+        b["expiring"].sort(key=lambda r: r["expiry"])
+        b["low_gb"].sort(key=lambda r: r["remaining"])
+        b["expired"].sort(key=lambda r: r["expiry"], reverse=True)
+        by_owner[owner] = {
+            "totals": {"expiring_3d": b["n_expiring"],
+                       "low_gb": b["n_low"], "expired": b["n_expired"]},
+            "expiring": b["expiring"][:OVERVIEW_LIST_CAP],
+            "low_gb": b["low_gb"][:OVERVIEW_LIST_CAP],
+            "expired": b["expired"][:OVERVIEW_LIST_CAP]}
     payload = {"ok": True,
                "stats": {"total": total, "active": active,
                          "expiring_3d": n_expiring, "low_gb": n_low,
                          "expired": n_expired},
-               "expiring": expiring[:OVERVIEW_LIST_CAP],
-               "low_gb": low_gb[:OVERVIEW_LIST_CAP],
-               "expired": expired[:OVERVIEW_LIST_CAP]}
+               "by_owner": by_owner}
     OVERVIEW_CACHE[owner_key()] = [now, payload]
     return jsonify(payload)
 
