@@ -282,17 +282,13 @@ function renderServers() {
           '<div class="used"><span class="dot off"></span><div class="muted small" style="color:var(--red)">' + seen + '</div></div>' +
           '<button class="keybtn" style="background:transparent;color:var(--red);border:1px solid var(--red)" onclick="event.stopPropagation();retryServer(' + s.id + ', this)">Retry</button></div>';
       }
-      // usage bar (v3): real numbers — used vs sum of clients' GB limits
-      const pct = (h && h.online && h.limit) ? Math.min(100, Math.round(h.used * 100 / h.limit)) : 0;
-      const bar = (h && h.online && h.limit)
-        ? '<div class="serverbar"><i style="width:' + pct + '%"></i></div>' : '';
       return '<div class="server" onclick="location.href=\'/server/' + s.id + '\'">' +
         '<div class="flag">' + flagFor(s.country) + '</div>' +
         '<div class="grow"><b style="font-size:18px">' + esc(s.name) + badges + '</b>' +
         '<div class="muted small">' + sub + '</div></div>' +
         '<div class="used"><span class="dot ' + dot + '"></span>' +
         (h && h.online ? '<div class="muted small">' + fmtGB(h.used) + '</div>' : '') + '</div>' +
-        '<button class="keybtn" onclick="event.stopPropagation();location.href=\'/server/' + s.id + '#add\'">+ Key</button>' + bar + '</div>';
+        '<button class="keybtn" onclick="event.stopPropagation();location.href=\'/server/' + s.id + '#add\'">+ Key</button></div>';
     }).join('');
     return html;
   }).join('');
