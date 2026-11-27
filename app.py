@@ -476,10 +476,17 @@ def list_servers():
             "SELECT * FROM servers WHERE owner=? "
             "ORDER BY is_sales DESC, sort_order, name",
             (u["username"],)).fetchall()
+    # v6.1: attach the owner's channel display name (resellers see their
+    # channel name in the admin's owner-grouped dashboard).
+    users = {r["username"]: (r["display_name"] or r["username"])
+             for r in get_db().execute(
+                 "SELECT username, display_name FROM users").fetchall()}
     out = []
     for row in rows:
         d = dict(row)
         d.pop("admin_pw_enc", None)
+        d["owner_display"] = users.get(d.get("owner") or "admin",
+                                       d.get("owner") or "admin")
         out.append(d)
     return out
 
@@ -515,6 +522,9 @@ HEALTH_TTL = 60
 # from re-scanning. Keyed per owner: a reseller must NEVER see another
 # owner's cached expiring keys.
 EXPIRING_CACHE = {}
+# v6.1: key-overview cache: owner_key -> [checked_at, payload] — same
+# one-pass scan, same 60s TTL, same per-owner keying.
+OVERVIEW_CACHE = {}
 # last successful check per server (for "last seen" on down servers)
 LAST_SEEN = {}
 
@@ -584,6 +594,11 @@ def public_client(server_id, c, created=None):
         # v6: which protocol this key is (outline / vless).
         "protocol": c.get("protocol", "outline"),
     }
+    # v6.1: online is included ONLY when the panel actually supplied it
+    # (3X-UI onlines endpoint, or Marzban online_at). Absent = unknown,
+    # and the UI omits the pill instead of showing Offline.
+    if isinstance(c.get("online"), bool):
+        d["online"] = c["online"]
     if c.get("uuid"):
         d["uuid"] = c["uuid"]
     return d
@@ -593,7 +608,10 @@ def public_client(server_id, c, created=None):
 @app.route("/api/servers")
 @login_required
 def api_servers():
-    return jsonify({"ok": True, "servers": list_servers()})
+    # v6.1: the dashboard needs the role to pick owner-grouping (admin)
+    # vs country-grouping (reseller).
+    return jsonify({"ok": True, "role": current_user()["role"],
+                    "servers": list_servers()})
 
 
 @app.route("/api/health")
@@ -624,6 +642,14 @@ def api_clients(server_id):
         client = make_client(server)
         if server["type"] == "xui":
             clients = client.list_clients()
+            # v6.1: one extra POST for the currently-connected list; a
+            # failed read returns None and the pill is omitted (never
+            # "everyone Offline"). Marzban users already carry "online"
+            # from list_users (online_at recency).
+            online = client.online_emails()
+            if online is not None:
+                for c in clients:
+                    c["online"] = c["name"] in online
             # v6: tell the page which VLESS inbounds exist (network +
             # port only — no credentials), so it can show the VLESS
             # section and the Outline/VLESS switch in the Add Key modal.
@@ -1071,6 +1097,96 @@ def api_expiring():
     return jsonify({"ok": True, "results": results[:100]})
 
 
+# ---------------------------------------------------------------- v6.1 key overview
+LOW_GB_BYTES = 10 * 1073741824  # 10 GB — keys at/below this remaining are "low GB"
+OVERVIEW_LIST_CAP = 100
+
+
+@app.route("/api/key-overview")
+@login_required
+def api_key_overview():
+    """One parallel scan of all visible servers computing the dashboard
+    stats + the three key lists in a single pass (replaces the old
+    7-day /api/expiring scan for the dashboard):
+      stats: active keys, keys expiring within 3 days, expired keys.
+      expiring: not expired, expiry within 3 days (soonest first).
+      low_gb: not expired, 0 < remaining <= 10 GB (least remaining first).
+      expired: expiry passed OR used >= limit (most recently expired
+        first); each row carries expired_reason "date" or "gb".
+    Classification (per the user's rules):
+      expired = (expiry and expiry <= now) OR (limit and used >= limit)
+      active  = enable AND expiry in the future AND used < limit
+    Lists are capped at 100 rows each; the stats counts are the TRUE
+    totals, not the capped lengths."""
+    now = time.time()
+    cache = OVERVIEW_CACHE.get(owner_key())
+    if cache and now - cache[0] < 60:
+        return jsonify(cache[1])
+    servers = [get_server(s["id"]) for s in list_servers()]
+    created_maps = {s["id"]: created_map(s["id"]) for s in servers}
+
+    def scan(full):
+        try:
+            return server_all_clients(full)
+        except Exception:  # noqa: BLE001
+            return []
+
+    active = 0
+    total = 0
+    n_expiring = n_low = n_expired = 0
+    expiring, low_gb, expired = [], [], []
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for full, clients in zip(servers, pool.map(scan, servers)):
+            created = created_maps[full["id"]]
+            for c in clients:
+                total += 1
+                exp = c.get("expiry") or 0
+                used = c.get("used") or 0
+                limit = c.get("limit") or 0
+                enable = c.get("enable", True)
+                is_expired = bool((exp and exp <= now) or
+                                  (limit and used >= limit))
+                if is_expired:
+                    n_expired += 1
+                    pc = public_client(full["id"], c,
+                                       created.get(c["name"]))
+                    pc["server_name"] = full["name"]
+                    pc["expired_reason"] = ("date" if exp and exp <= now
+                                            else "gb")
+                    expired.append(pc)
+                    continue
+                if enable and (not exp or exp > now) and \
+                        (not limit or used < limit):
+                    active += 1
+                if exp and now < exp <= now + 3 * 86400:
+                    n_expiring += 1
+                    pc = public_client(full["id"], c,
+                                       created.get(c["name"]))
+                    pc["server_name"] = full["name"]
+                    pc["days_left"] = max(0, int((exp - now) // 86400))
+                    expiring.append(pc)
+                if limit and 0 < (limit - used) <= LOW_GB_BYTES:
+                    n_low += 1
+                    pc = public_client(full["id"], c,
+                                       created.get(c["name"]))
+                    pc["server_name"] = full["name"]
+                    pc["remaining"] = limit - used
+                    pc["remaining_h"] = fmt_gb(limit - used)
+                    low_gb.append(pc)
+    expiring.sort(key=lambda r: r["expiry"])
+    low_gb.sort(key=lambda r: r["remaining"])
+    expired.sort(key=lambda r: r["expiry"], reverse=True)
+    payload = {"ok": True,
+               "stats": {"total": total, "active": active,
+                         "expiring_3d": n_expiring, "low_gb": n_low,
+                         "expired": n_expired},
+               "expiring": expiring[:OVERVIEW_LIST_CAP],
+               "low_gb": low_gb[:OVERVIEW_LIST_CAP],
+               "expired": expired[:OVERVIEW_LIST_CAP]}
+    OVERVIEW_CACHE[owner_key()] = [now, payload]
+    return jsonify(payload)
+
+
 @app.route("/api/server/<int:server_id>/test", methods=["POST"])
 @login_required
 def api_test(server_id):
@@ -1175,6 +1291,11 @@ def api_vless_clients(server_id):
     try:
         client = make_client(server)
         clients = client.list_vless_clients()
+        # v6.1: VLESS clients are matched by email, same as Outline.
+        online = client.online_emails()
+        if online is not None:
+            for c in clients:
+                c["online"] = c["name"] in online
     except Exception as exc:  # noqa: BLE001
         return jsonify({"ok": False, "error": str(exc)[:300]}), 502
     created = created_map(server_id)
@@ -1283,6 +1404,157 @@ def api_add_vless_key(server_id):
                     "custom": bool(custom_gb is not None
                                   or custom_date is not None),
                     "summary": summary})
+
+
+# ---------------------------------------------------------------- v6.1 bulk keys
+@app.route("/api/server/<int:server_id>/bulk-add-key", methods=["POST"])
+@login_required
+def api_bulk_add_key(server_id):
+    """Create N keys at once: {base}-{i}___DD_MM_YYYY, i = 1..N.
+    Same months -> GB (1=400, 2=1000, 3=1500) and expiry rules as the
+    single add-key routes; custom gb / expiry_date override the preset.
+    protocol "vless" (3X-UI only) gives each key the same-UUID-on-all-
+    VLESS-inbounds treatment as a single VLESS create. Creates stop at
+    the first failure and the response lists what was already made."""
+    server, err = _owned_server(server_id)
+    if err:
+        return err
+    data = request.get_json(force=True, silent=True) or {}
+    protocol = (data.get("protocol") or "outline").strip().lower()
+    if protocol not in ("outline", "vless"):
+        return jsonify({"ok": False,
+                        "error": "protocol must be outline or vless"}), 400
+    if protocol == "vless" and server["type"] != "xui":
+        return jsonify({"ok": False,
+                        "error": "VLESS is 3X-UI only"}), 400
+    base = (data.get("base_name") or data.get("name") or "").strip()
+    base = "".join(ch for ch in base if ch.isalnum() or ch in "_-")
+    if not base:
+        return jsonify({"ok": False, "error": "base name needed"}), 400
+    try:
+        count = int(data.get("count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if count < 1 or count > 50:
+        return jsonify({"ok": False,
+                        "error": "count must be 1..50"}), 400
+    custom_gb = None
+    if data.get("gb") is not None:
+        try:
+            custom_gb = float(data.get("gb"))
+        except (TypeError, ValueError):
+            custom_gb = 0
+        if not custom_gb or custom_gb <= 0 or custom_gb > 100000:
+            return jsonify({"ok": False,
+                            "error": "gb must be a positive number"}), 400
+    custom_date = None
+    if data.get("expiry_date"):
+        try:
+            custom_date = datetime.strptime(
+                str(data["expiry_date"]).strip(), "%Y-%m-%d").date()
+        except ValueError:
+            return jsonify({"ok": False,
+                            "error": "expiry_date must be YYYY-MM-DD"}), 400
+    try:
+        months = int(data.get("months") or 1)
+    except (TypeError, ValueError):
+        months = 0
+    if months not in MONTHS_GB:
+        return jsonify({"ok": False, "error": "months must be 1, 2 or 3"}), 400
+    gb = custom_gb if custom_gb is not None else MONTHS_GB[months]
+    total_bytes = (GB_BYTES[int(gb)] if float(gb).is_integer()
+                   and int(gb) in GB_BYTES else int(gb * 1073741824))
+    if custom_date:
+        exp_date = custom_date
+        suffix = "%d_%d_%d" % (exp_date.day, exp_date.month, exp_date.year)
+    else:
+        exp_date, suffix = expiry_for(months)
+    try:
+        client = make_client(server)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 502
+    created_keys = []
+    for i in range(1, count + 1):
+        name = "%s-%d__%s" % (base, i, suffix)
+        try:
+            if server["type"] == "xui":
+                exp_ms = int((datetime(exp_date.year, exp_date.month,
+                                       exp_date.day, tzinfo=MM)
+                              + timedelta(days=1)).timestamp() * 1000)
+                if protocol == "vless":
+                    rec = client.create_vless_client(name, total_bytes,
+                                                     exp_ms)
+                    links = client.build_vless_links(rec)
+                    link = links["primary"]
+                else:
+                    rec = client.create_client(name, total_bytes, exp_ms)
+                    link = client.build_link(rec)
+            else:
+                exp_s = int(datetime(exp_date.year, exp_date.month,
+                                     exp_date.day, 23, 59,
+                                     tzinfo=MM).timestamp())
+                rec = client.create_user(name, total_bytes, exp_s)
+                link = client.build_link(rec)
+        except Exception as exc:  # noqa: BLE001 - stop at first failure
+            HEALTH_CACHE.pop(server_id, None)
+            return jsonify({"ok": False, "error": str(exc)[:300],
+                            "created": created_keys,
+                            "created_count": len(created_keys)}), 502
+        note_key_created(server_id, name)
+        created_keys.append({"name": name, "link": link,
+                             "protocol": protocol})
+    HEALTH_CACHE.pop(server_id, None)
+    return jsonify({"ok": True, "created": created_keys,
+                    "created_count": len(created_keys),
+                    "expiry": exp_date.isoformat(),
+                    "expiry_h": exp_date.strftime("%d %b %Y"),
+                    "gb": gb, "months": months,
+                    "limit": total_bytes})
+
+
+@app.route("/api/server/<int:server_id>/bulk-delete-key", methods=["POST"])
+@login_required
+def api_bulk_delete_key(server_id):
+    """Delete several keys at once. Body: {"items": [{"name": ..., 
+    "protocol": "outline"|"vless"}]} (protocol defaults to outline;
+    Marzban servers ignore it). The UI always asks for confirmation
+    with the count before calling this. Per-key failures are reported
+    in "failed" — the rest still delete."""
+    server, err = _owned_server(server_id)
+    if err:
+        return err
+    data = request.get_json(force=True, silent=True) or {}
+    items = data.get("items") or data.get("names") or []
+    if not isinstance(items, list) or not items or len(items) > 100:
+        return jsonify({"ok": False,
+                        "error": "items must be a list of 1..100 keys"}), 400
+    try:
+        client = make_client(server)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 502
+    deleted, failed = [], []
+    for it in items:
+        if isinstance(it, dict):
+            name = (it.get("name") or "").strip()
+            proto = (it.get("protocol") or "outline").strip().lower()
+        else:
+            name, proto = str(it).strip(), "outline"
+        if not name:
+            failed.append({"name": name, "error": "empty name"})
+            continue
+        try:
+            if server["type"] == "marzban":
+                client.delete_user(name)
+            elif proto == "vless":
+                client.delete_vless_client(name)
+            else:
+                client.delete_client(name)
+            note_key_deleted(server_id, name)
+            deleted.append(name)
+        except Exception as exc:  # noqa: BLE001
+            failed.append({"name": name, "error": str(exc)[:120]})
+    HEALTH_CACHE.pop(server_id, None)
+    return jsonify({"ok": True, "deleted": deleted, "failed": failed})
 
 
 @app.route("/api/server/<int:server_id>/delete-vless-key", methods=["POST"])
