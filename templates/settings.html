@@ -2,7 +2,7 @@
 {% set nav='settings' %}
 {% block title %}Settings — KHP Panel{% endblock %}
 {% block content %}
-<h2 class="sec">Servers</h2>
+<h2 class="sec sec-servers">Servers</h2>
 <div id="settings-list"><div class="spin">Loading…</div></div>
 
 <h2 class="sec" id="form-title">Add a server</h2>
@@ -41,5 +41,5 @@
 </div>
 {% endblock %}
 {% block scripts %}
-<script>loadSettings();</script>
+<script>initSettings();</script>
 {% endblock %}
