@@ -61,7 +61,11 @@ chown -R www-data:www-data /opt/khp-panel
 # Systemd service (runs gunicorn on 127.0.0.1:5000)
 cp khp-panel.service /etc/systemd/system/khp-panel.service
 systemctl daemon-reload
-systemctl enable --now khp-panel
+systemctl enable khp-panel
+# Restart (not just start) so a re-run picks up freshly pulled code.
+# Sessions survive the restart: Flask sessions are signed cookies and
+# secret.key is untouched by git pull, and the SQLite DB is untracked.
+systemctl restart khp-panel
 
 # Caddy reverse proxy with auto HTTPS
 sed "s/DOMAIN_PLACEHOLDER/$DOMAIN/" Caddyfile > /etc/caddy/Caddyfile
