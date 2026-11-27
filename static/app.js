@@ -436,13 +436,16 @@ function applyKeyPatch(serverId, oldName, patch) {
   }
 }
 async function loadServerPage() {
-  try {
-    const h = await api('/api/health');
+  // v4.2: health and keys load IN PARALLEL — the old code awaited
+  // /api/health first, so the key list waited behind the slowest of 12
+  // panel checks (and behind a queued gunicorn worker). Keys render as
+  // soon as they arrive; the header updates when health arrives.
+  const healthP = api('/api/health').then(h => {
     const me = h.health.find(x => x.id === SERVER_ID);
     document.getElementById('srv-status').textContent =
       me ? (me.online ? me.clients + ' clients' : 'offline — ' + (me.error || '')) : 'unknown';
     document.getElementById('srv-dot').className = 'dot ' + (me && me.online ? 'on' : 'off');
-  } catch (e) { /* health is best-effort */ }
+  }).catch(() => { /* health is best-effort */ });
   try {
     const j = await api('/api/server/' + SERVER_ID + '/clients');
     ALL_CLIENTS = j.clients;
@@ -452,6 +455,7 @@ async function loadServerPage() {
     document.getElementById('client-list').innerHTML =
       '<div class="error">Could not load keys: ' + esc(e.message) + '</div>';
   }
+  await healthP;
 }
 function filteredClients() {
   const f = (document.getElementById('client-filter').value || '').toLowerCase();
@@ -825,6 +829,12 @@ function swapMain(url, data, push) {
     const sf = document.getElementById('server-filter');
     if (sf && data.sf) sf.value = data.sf;
   }
+  if (url === '/settings' && SERVERS.length) {
+    // v4.2: the dashboard already fetched the server list — show real
+    // rows at once instead of the template's "Loading…" placeholder.
+    const sl = document.getElementById('settings-list');
+    if (sl) sl.innerHTML = settingsListHtml(SERVERS);
+  }
   document.title = data.title;
   const tab = url === '/settings' ? 'settings' : 'servers';
   document.querySelectorAll('nav.bottom a[data-tab]').forEach(a => {
@@ -884,28 +894,34 @@ window.addEventListener('popstate', () => {
 });
 
 /* ---------------- settings ---------------- */
+/* v4.2: settings row HTML, shared by loadSettings() and the tab-switch
+   pre-render in swapMain() (the dashboard already holds SERVERS, so the
+   first Settings switch shows real rows instantly instead of "Loading…"). */
+function settingsListHtml(servers) {
+  if (!servers.length) return '<div class="empty">No servers yet.</div>';
+  return servers.map(s =>
+    // v4: flag tile + FREE/SALES badges on every row, cleaner layout
+    '<div class="card"><div class="row">' +
+    '<span class="flag-sm">' + flagSVG(s.country) + '</span>' +
+    '<div class="grow">' +
+    '<b style="font-size:17px">' + esc(s.name) + '</b>' +
+    (s.is_free ? '<span class="badge-free">FREE</span>' : '') +
+    (s.is_sales ? '<span class="badge-sales">SALES</span>' : '') +
+    '<div class="muted small">' + esc(s.type === 'xui' ? '3X-UI' : 'Marzban') + ' • ' + esc(countryName(s.country)) + '</div>' +
+    '<div class="muted small">' + esc(s.base_url) + '</div></div></div>' +
+    '<div class="row" style="margin-top:12px">' +
+    '<button class="btn ghost" onclick="editServer(' + s.id + ')">Edit</button>' +
+    '<button class="btn ghost" onclick="testServer(' + s.id + ', this)">Test connection</button>' +
+    '<button class="btn ghost" style="color:var(--red);border-color:rgba(239,68,68,.5)" onclick="removeServer(' + s.id + ', \'' + esc(s.name) + '\', this)">Remove</button>' +
+    '</div><div class="muted small" id="test-' + s.id + '" style="margin-top:8px"></div></div>'
+  ).join('');
+}
 async function loadSettings() {
   try {
     const j = await api('/api/servers');
     SERVERS = j.servers; // editServer() reads from this global
     const el = document.getElementById('settings-list');
-    if (!j.servers.length) { el.innerHTML = '<div class="empty">No servers yet.</div>'; return; }
-    el.innerHTML = j.servers.map(s =>
-      // v4: flag tile + FREE/SALES badges on every row, cleaner layout
-      '<div class="card"><div class="row">' +
-      '<span class="flag-sm">' + flagSVG(s.country) + '</span>' +
-      '<div class="grow">' +
-      '<b style="font-size:17px">' + esc(s.name) + '</b>' +
-      (s.is_free ? '<span class="badge-free">FREE</span>' : '') +
-      (s.is_sales ? '<span class="badge-sales">SALES</span>' : '') +
-      '<div class="muted small">' + esc(s.type === 'xui' ? '3X-UI' : 'Marzban') + ' • ' + esc(countryName(s.country)) + '</div>' +
-      '<div class="muted small">' + esc(s.base_url) + '</div></div></div>' +
-      '<div class="row" style="margin-top:12px">' +
-      '<button class="btn ghost" onclick="editServer(' + s.id + ')">Edit</button>' +
-      '<button class="btn ghost" onclick="testServer(' + s.id + ', this)">Test connection</button>' +
-      '<button class="btn ghost" style="color:var(--red);border-color:rgba(239,68,68,.5)" onclick="removeServer(' + s.id + ', \'' + esc(s.name) + '\', this)">Remove</button>' +
-      '</div><div class="muted small" id="test-' + s.id + '" style="margin-top:8px"></div></div>'
-    ).join('');
+    el.innerHTML = settingsListHtml(j.servers);
     snapshotTab('/settings');
   } catch (e) {
     document.getElementById('settings-list').innerHTML =
