@@ -33,40 +33,52 @@ function esc(s) {
 
 /* ---------------- dashboard ---------------- */
 let SERVERS = [], HEALTH = {};
-let EXPIRING = [], EXPIRING_ALL = false, EXP_COUNTS = {};
-let EXP_LOADED = false;
-// v4: "Expiring soon" starts COLLAPSED (tap the header to show). The
-// choice is remembered on this device.
-let EXP_COLLAPSED = localStorage.getItem('khp_exp_collapsed') !== '0';
+let IS_ADMIN = false; // v6.1: set from /api/servers — admin gets owner grouping
+// v6.1: the key-overview scan (one pass) feeds the 4 stat cards + the
+// three key lists. EXP_COUNTS feeds the "N expiring" note on server cards
+// (expiring within 3 days now, not 7).
+let EXP3 = [], EXP3_ALL = false;
+let LOWGB = [], LOWGB_ALL = false;
+let EXPIRED = [], EXPIRED_ALL = false;
+let OV_STATS = null, OVERVIEW_LOADED = false;
+let EXP_COUNTS = {};
+// v6.1: all three sections start COLLAPSED (tap the bar to show). The
+// choice is remembered on this device, per section.
+let EXP3_COLLAPSED = localStorage.getItem('khp_exp3_collapsed') !== '0';
+let LOWGB_COLLAPSED = localStorage.getItem('khp_lowgb_collapsed') !== '0';
+let EXPIRED_COLLAPSED = localStorage.getItem('khp_expired_collapsed') !== '0';
 let EXPANDED = new Set(); // v5: country groups start COLLAPSED on login — tap a country to expand
 let CHECKED_AT = 0;
 let DASH_TIMER = null; // 60s quiet auto-refresh timer (cleared on tab switch)
 let NAV_CACHE = {}; // prefetched tab HTML, for instant tab switching
-let lastServersHtml = null, lastExpiringHtml = null;
-// v4.3: the tab cache + dashboard state live in sessionStorage so they
-// survive full page loads — every server-page visit is a fresh JS
-// context, and without this each return to the dashboard re-flashed
-// "Loading servers…" + "–" stats. Restored instantly on load; the quiet
-// refresh updates the numbers behind it within seconds.
+let lastServersHtml = null;
+const lastSectionHtml = {exp3: null, lowgb: null, expired: null};
+// v6.1: the tab cache key is bumped (v1 -> v2) because the dashboard
+// template changed shape (new stat cards + three key sections) — an old
+// snapshot would restore HTML the new renderers cannot fill.
 try {
-  const _s = JSON.parse(sessionStorage.getItem('khp_nav_cache_v1') || 'null');
+  const _s = JSON.parse(sessionStorage.getItem('khp_nav_cache_v2') || 'null');
   if (_s) {
     NAV_CACHE = _s.nav || {};
     SERVERS = _s.servers || [];
     HEALTH = _s.health || {};
     CHECKED_AT = _s.checkedAt || 0;
-    EXPIRING = _s.expiring || [];
-    EXP_LOADED = !!_s.expLoaded;
+    EXP3 = _s.exp3 || [];
+    LOWGB = _s.lowgb || [];
+    EXPIRED = _s.expired || [];
+    OV_STATS = _s.ovStats || null;
+    OVERVIEW_LOADED = !!_s.ovLoaded;
     EXPANDED = new Set(_s.expanded || []);
     EXP_COUNTS = {};
-    EXPIRING.forEach(c => { EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1; });
+    EXP3.forEach(c => { EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1; });
   }
 } catch (e) { /* private mode / quota: in-memory cache still works */ }
 function persistTabCache() {
   try {
-    sessionStorage.setItem('khp_nav_cache_v1', JSON.stringify({
+    sessionStorage.setItem('khp_nav_cache_v2', JSON.stringify({
       nav: NAV_CACHE, servers: SERVERS, health: HEALTH,
-      checkedAt: CHECKED_AT, expiring: EXPIRING, expLoaded: EXP_LOADED,
+      checkedAt: CHECKED_AT, exp3: EXP3, lowgb: LOWGB, expired: EXPIRED,
+      ovStats: OV_STATS, ovLoaded: OVERVIEW_LOADED,
       expanded: [...EXPANDED]}));
   } catch (e) { /* ignore */ }
 }
@@ -127,9 +139,16 @@ function fmtTime(ts) {
 async function loadDashboard(force) {
   try {
     const healthP = api('/api/health' + (force ? '?force=1' : '')).catch(() => null);
-    const expP = api('/api/expiring?days=7').catch(() => null);
+    const ovP = api('/api/key-overview').catch(() => null);
     const sj = await api('/api/servers');
     SERVERS = sj.servers;
+    IS_ADMIN = sj.role === 'admin';
+    // v6.1: on the first load, MY SERVERS starts expanded for the admin
+    // (OTHER + the person groups stay collapsed). Seeded once per device.
+    if (IS_ADMIN && !localStorage.getItem('khp_owner_seeded_v61')) {
+      EXPANDED.add('owner:admin');
+      localStorage.setItem('khp_owner_seeded_v61', '1');
+    }
     renderServers();
     const h = await healthP;
     if (h) {
@@ -141,14 +160,14 @@ async function loadDashboard(force) {
       const statEl = document.getElementById('stat-servers');
       statEl.textContent = online + ' / ' + h.health.length;
       statEl.parentElement.classList.toggle('down', online < h.health.length);
-      document.getElementById('stat-keys').textContent =
-        h.health.reduce((a, x) => a + (x.clients || 0), 0).toLocaleString('en-US');
+      // v6.1: the blue "Active keys" card comes from the overview scan,
+      // not the health total (active = enabled + not expired + under GB).
       document.getElementById('last-checked').textContent =
         'Last checked ' + fmtTime(CHECKED_AT) + ' • auto-refresh every 60s';
       renderServers();
     }
-    const ej = await expP;
-    if (ej) applyExpiring(ej.results);
+    const oj = await ovP;
+    if (oj) applyOverview(oj);
     snapshotTab('/dashboard');
   } catch (e) {
     document.getElementById('server-list').innerHTML =
@@ -162,7 +181,7 @@ async function refreshDashboardQuiet() {
   if (!document.getElementById('server-list')) return; // not on dashboard
   try {
     const healthP = api('/api/health').catch(() => null);
-    const expP = api('/api/expiring?days=7').catch(() => null);
+    const ovP = api('/api/key-overview').catch(() => null);
     const h = await healthP;
     if (h) {
       HEALTH = {};
@@ -173,24 +192,34 @@ async function refreshDashboardQuiet() {
       const statEl = document.getElementById('stat-servers');
       statEl.textContent = online + ' / ' + h.health.length;
       statEl.parentElement.classList.toggle('down', online < h.health.length);
-      document.getElementById('stat-keys').textContent =
-        h.health.reduce((a, x) => a + (x.clients || 0), 0).toLocaleString('en-US');
       document.getElementById('last-checked').textContent =
         'Last checked ' + fmtTime(CHECKED_AT) + ' • auto-refresh every 60s';
       renderServers();
     }
-    const ej = await expP;
-    if (ej) applyExpiring(ej.results);
+    const oj = await ovP;
+    if (oj) applyOverview(oj);
     snapshotTab('/dashboard');
   } catch (e) { /* quiet: a failed background tick just tries again next minute */ }
 }
-function applyExpiring(results) {
-  EXPIRING = results;
-  EXP_LOADED = true;
+/* v6.1: one overview payload feeds the blue/yellow/red stat cards and
+   the three key sections. The server-card "N expiring" notes come from
+   the 3-day list. */
+function applyOverview(j) {
+  OVERVIEW_LOADED = true;
+  OV_STATS = j.stats || null;
+  EXP3 = j.expiring || [];
+  LOWGB = j.low_gb || [];
+  EXPIRED = j.expired || [];
   EXP_COUNTS = {};
-  results.forEach(c => EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1);
-  document.getElementById('stat-expiring').textContent = results.length;
-  renderExpiring();
+  EXP3.forEach(c => EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1);
+  const setStat = (id, v) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = v;
+  };
+  setStat('stat-keys', (j.stats.active || 0).toLocaleString('en-US'));
+  setStat('stat-expiring3', j.stats.expiring_3d || 0);
+  setStat('stat-expired', j.stats.expired || 0);
+  renderKeySections();
   renderServers(); // expiring counts feed the server cards
 }
 function initDashboard() {
@@ -228,16 +257,69 @@ async function retryServer(id, btn) {
   btn.disabled = false; btn.textContent = 'Retry';
   loadDashboard(true);
 }
+/* v6.1: one server row, shared by the country grouping (resellers)
+   and the owner grouping (admin). */
+function serverRowHtml(s) {
+  const h = HEALTH[s.id];
+  const online = h ? h.online : null;
+  const dot = online === null ? '' : (online ? 'on' : 'off');
+  const expN = EXP_COUNTS[s.id] || 0;
+  const expHtml = expN ? ' <span class="exp-count">• ' + expN + ' expiring</span>' : '';
+  const badges = (s.is_free ? '<span class="badge-free">FREE</span>' : '') +
+    (s.is_sales ? '<span class="badge-sales">SALES</span>' : '');
+  if (online === false) {
+    const seen = h.last_seen ? 'last seen ' + fmtTime(h.last_seen) : 'never seen';
+    return '<div class="server down">' +
+      '<div class="flag">' + flagFor(s.country) + '</div>' +
+      '<div class="grow"><b style="font-size:18px">' + esc(s.name) +
+      '<span class="badge-down">DOWN</span></b>' +
+      '<div class="muted small">' + (s.type === 'xui' ? '3X-UI' : 'Marzban') + ' • ' + h.clients + ' clients</div></div>' +
+      '<div class="used"><span class="dot off"></span><div class="muted small" style="color:var(--red)">' + seen + '</div></div>' +
+      '<button class="keybtn" style="background:transparent;color:var(--red);border:1px solid var(--red)" onclick="event.stopPropagation();retryServer(' + s.id + ', this)">Retry</button></div>';
+  }
+  const sub = online === null
+    ? (s.country + ' • checking…')
+    : (s.type === 'xui' ? '3X-UI' : 'Marzban') + ' • ' + h.clients + ' clients' + expHtml;
+  // usage bar (v3): real numbers — used vs sum of clients' GB limits
+  const pct = (h && h.online && h.limit) ? Math.min(100, Math.round(h.used * 100 / h.limit)) : 0;
+  const bar = (h && h.online && h.limit)
+    ? '<div class="serverbar"><i style="width:' + pct + '%"></i></div>' : '';
+  return '<div class="server" onclick="location.href=\'/server/' + s.id + '\'">' +
+    '<div class="flag">' + flagFor(s.country) + '</div>' +
+    '<div class="grow"><b style="font-size:18px">' + esc(s.name) + badges + '</b>' +
+    '<div class="muted small">' + sub + '</div></div>' +
+    '<div class="used"><span class="dot ' + dot + '"></span>' +
+    (h && h.online ? '<div class="muted small">' + fmtGB(h.used) + '</div>' : '') + '</div>' +
+    '<button class="keybtn" onclick="event.stopPropagation();location.href=\'/server/' + s.id + '#add\'">+ Key</button>' + bar + '</div>';
+}
+/* Right side of a group header: server count + total keys + whether the
+   whole group is online, with a green dot. */
+function groupMetaHtml(items) {
+  const hasHealth = items.some(s => HEALTH[s.id]);
+  const allOnline = hasHealth && items.every(s => HEALTH[s.id] && HEALTH[s.id].online);
+  const keysTotal = items.reduce((a, s) =>
+    a + ((HEALTH[s.id] && HEALTH[s.id].online) ? (HEALTH[s.id].clients || 0) : 0), 0);
+  return (allOnline ? '<span class="dot"></span>' : '') +
+    '<div class="meta"><div class="n">' + items.length + ' server' +
+    (items.length === 1 ? '' : 's') + '</div>' +
+    '<div class="s">' + (hasHealth ? keysTotal.toLocaleString('en-US') + ' keys • ' +
+      (allOnline ? 'all online' : 'some down') : 'checking…') + '</div></div>';
+}
 function renderServers() {
   const el = document.getElementById('server-list');
   const f = (document.getElementById('server-filter').value || '').toLowerCase();
   const list = SERVERS.filter(s => s.name.toLowerCase().includes(f) ||
-    (s.country || '').toLowerCase().includes(f));
+    (s.country || '').toLowerCase().includes(f) ||
+    (s.owner_display || '').toLowerCase().includes(f));
   if (!list.length) {
     const html = '<div class="empty">No servers yet — add one in Settings.</div>';
     if (lastServersHtml !== html) { el.innerHTML = html; lastServersHtml = html; }
     return;
   }
+  // v6.1: the Super Admin sees owner grouping — MY SERVERS on top, then
+  // OTHER with one sub-group per reseller (channel name). Resellers
+  // keep the country grouping (they only ever see their own servers).
+  if (IS_ADMIN) { renderServersByOwner(el, list, f); return; }
   // group by country: Singapore / Japan / Thailand first, then the rest
   const groups = {};
   list.forEach(s => {
@@ -251,64 +333,63 @@ function renderServers() {
   });
   const html = order.map(g => {
     const items = groups[g];
-    const collapsed = !EXPANDED.has(g);
+    // a filter forces every group open so matches are always findable
+    const collapsed = f ? false : !EXPANDED.has(g);
     const chev = collapsed ? '▼' : '▲';
-    // v6 polish: right side shows the server count + total keys and
-    // whether the whole group is online, with a green dot.
-    const hasHealth = items.some(s => HEALTH[s.id]);
-    const allOnline = hasHealth && items.every(s => HEALTH[s.id] && HEALTH[s.id].online);
-    const keysTotal = items.reduce((a, s) =>
-      a + ((HEALTH[s.id] && HEALTH[s.id].online) ? (HEALTH[s.id].clients || 0) : 0), 0);
     let html = '<div class="group-h" onclick="toggleGroup(\'' + esc(g) + '\')">' +
       '<span class="gflag">' + flagFor(g === 'Other' ? '' : g) + '</span>' +
       '<b>' + esc(countryName(g)) + '</b>' +
-      (allOnline ? '<span class="dot"></span>' : '') +
-      '<div class="meta"><div class="n">' + items.length + ' server' +
-      (items.length === 1 ? '' : 's') + '</div>' +
-      '<div class="s">' + (hasHealth ? keysTotal.toLocaleString('en-US') + ' keys • ' +
-        (allOnline ? 'all online' : 'some down') : 'checking…') + '</div></div>' +
+      groupMetaHtml(items) +
       '<span class="chev">' + chev + '</span></div>';
     if (collapsed) return html;
-    html += items.map(s => {
-      const h = HEALTH[s.id];
-      const online = h ? h.online : null;
-      const dot = online === null ? '' : (online ? 'on' : 'off');
-      const expN = EXP_COUNTS[s.id] || 0;
-      const expHtml = expN ? ' <span class="exp-count">• ' + expN + ' expiring</span>' : '';
-      const badges = (s.is_free ? '<span class="badge-free">FREE</span>' : '') +
-        (s.is_sales ? '<span class="badge-sales">SALES</span>' : '');
-      const sub = online === null
-        ? (s.country + ' • checking…')
-        : online
-          ? (s.type === 'xui' ? '3X-UI' : 'Marzban') + ' • ' + h.clients + ' clients' + expHtml
-          : ('Offline — ' + esc(h.error || 'unreachable'));
-      if (online === false) {
-        const seen = h.last_seen ? 'last seen ' + fmtTime(h.last_seen) : 'never seen';
-        return '<div class="server down">' +
-          '<div class="flag">' + flagFor(s.country) + '</div>' +
-          '<div class="grow"><b style="font-size:18px">' + esc(s.name) +
-          '<span class="badge-down">DOWN</span></b>' +
-          '<div class="muted small">' + (s.type === 'xui' ? '3X-UI' : 'Marzban') + ' • ' + h.clients + ' clients</div></div>' +
-          '<div class="used"><span class="dot off"></span><div class="muted small" style="color:var(--red)">' + seen + '</div></div>' +
-          '<button class="keybtn" style="background:transparent;color:var(--red);border:1px solid var(--red)" onclick="event.stopPropagation();retryServer(' + s.id + ', this)">Retry</button></div>';
-      }
-      // usage bar (v3): real numbers — used vs sum of clients' GB limits
-      const pct = (h && h.online && h.limit) ? Math.min(100, Math.round(h.used * 100 / h.limit)) : 0;
-      const bar = (h && h.online && h.limit)
-        ? '<div class="serverbar"><i style="width:' + pct + '%"></i></div>' : '';
-      return '<div class="server" onclick="location.href=\'/server/' + s.id + '\'">' +
-        '<div class="flag">' + flagFor(s.country) + '</div>' +
-        '<div class="grow"><b style="font-size:18px">' + esc(s.name) + badges + '</b>' +
-        '<div class="muted small">' + sub + '</div></div>' +
-        '<div class="used"><span class="dot ' + dot + '"></span>' +
-        (h && h.online ? '<div class="muted small">' + fmtGB(h.used) + '</div>' : '') + '</div>' +
-        '<button class="keybtn" onclick="event.stopPropagation();location.href=\'/server/' + s.id + '#add\'">+ Key</button>' + bar + '</div>';
-    }).join('');
+    html += items.map(serverRowHtml).join('');
     return html;
   }).join('');
   // v4: only touch the DOM when the HTML actually changed — replacing
   // identical markup every 60s is what made the list visibly flicker.
   if (lastServersHtml !== html) { el.innerHTML = html; lastServersHtml = html; }
+}
+/* v6.1: admin owner grouping. MY SERVERS (his 12) expanded by default;
+   OTHER (the 42 reseller servers) collapsed by default; inside it one
+   collapsed sub-group per reseller, headed by their channel name. */
+function renderServersByOwner(el, list, f) {
+  const mine = list.filter(s => s.owner === 'admin');
+  const others = list.filter(s => s.owner !== 'admin');
+  const persons = {};
+  others.forEach(s => { (persons[s.owner] = persons[s.owner] || []).push(s); });
+  const personOrder = Object.keys(persons).sort((a, b) =>
+    (persons[a][0].owner_display || a).localeCompare(persons[b][0].owner_display || b));
+  let html = '';
+  // a filter hides a top group with no matches (like country groups)
+  if (mine.length || !f) html += ownerGroupHtml('owner:admin', 'MY SERVERS', mine, f, null);
+  if (others.length || !f) html += ownerGroupHtml('group:other', 'OTHER', others, f,
+    personOrder.map(o => ({owner: o, servers: persons[o]})));
+  if (lastServersHtml !== html) { el.innerHTML = html; lastServersHtml = html; }
+}
+function ownerGroupHtml(key, title, servers, f, persons) {
+  const collapsed = f ? false : !EXPANDED.has(key);
+  const chev = collapsed ? '▼' : '▲';
+  let html = '<div class="group-h" onclick="toggleGroup(\'' + esc(key) + '\')">' +
+    '<b>' + esc(title) + '</b>' + groupMetaHtml(servers) +
+    '<span class="chev">' + chev + '</span></div>';
+  if (collapsed) return html;
+  if (persons) {
+    html += persons.map(p => {
+      const pkey = 'owner:' + p.owner;
+      const pCollapsed = f ? false : !EXPANDED.has(pkey);
+      const pchev = pCollapsed ? '▼' : '▲';
+      let ph = '<div class="person-h" onclick="toggleGroup(\'' + esc(pkey) + '\')">' +
+        '<b>' + esc(p.servers[0].owner_display || p.owner) + '</b>' +
+        groupMetaHtml(p.servers) +
+        '<span class="chev">' + pchev + '</span></div>';
+      if (pCollapsed) return ph;
+      return ph + '<div class="person-body">' +
+        p.servers.map(serverRowHtml).join('') + '</div>';
+    }).join('');
+  } else {
+    html += servers.map(serverRowHtml).join('');
+  }
+  return html;
 }
 function toggleGroup(g) {
   if (EXPANDED.has(g)) EXPANDED.delete(g); else EXPANDED.add(g);
@@ -318,49 +399,103 @@ function toggleGroup(g) {
   snapshotTab('/dashboard');
 }
 function filterServers() { renderServers(); }
-/* v4: "Expiring soon" is collapsible (default collapsed). The header
-   always shows the count; the list only renders when expanded. */
-function toggleExpiring() {
-  EXP_COLLAPSED = !EXP_COLLAPSED;
-  localStorage.setItem('khp_exp_collapsed', EXP_COLLAPSED ? '1' : '0');
-  renderExpiring();
+/* v6.1: the three dashboard key sections — EXPIRING IN 3 DAYS (yellow),
+   LOW GB (orange), EXPIRED KEYS (red). Each starts COLLAPSED; the choice
+   is remembered on this device, per section. */
+const KEY_SECTIONS = {
+  exp3: {list: () => EXP3, collapsed: () => EXP3_COLLAPSED,
+         setCollapsed: v => { EXP3_COLLAPSED = v; localStorage.setItem('khp_exp3_collapsed', v ? '1' : '0'); },
+         all: () => EXP3_ALL, setAll: v => { EXP3_ALL = v; },
+         empty: 'Nothing expiring in the next 3 days.',
+         row: expiringRowHtml},
+  lowgb: {list: () => LOWGB, collapsed: () => LOWGB_COLLAPSED,
+          setCollapsed: v => { LOWGB_COLLAPSED = v; localStorage.setItem('khp_lowgb_collapsed', v ? '1' : '0'); },
+          all: () => LOWGB_ALL, setAll: v => { LOWGB_ALL = v; },
+          empty: 'No keys under 10 GB left.',
+          row: lowGbRowHtml},
+  expired: {list: () => EXPIRED, collapsed: () => EXPIRED_COLLAPSED,
+            setCollapsed: v => { EXPIRED_COLLAPSED = v; localStorage.setItem('khp_expired_collapsed', v ? '1' : '0'); },
+            all: () => EXPIRED_ALL, setAll: v => { EXPIRED_ALL = v; },
+            empty: 'No expired keys.',
+            row: expiredRowHtml},
+};
+function toggleKeySection(which) {
+  const s = KEY_SECTIONS[which];
+  s.setCollapsed(!s.collapsed());
+  renderKeySections();
 }
-function renderExpiring() {
-  const head = document.getElementById('expiring-head');
-  const el = document.getElementById('expiring');
-  if (!el) return;
-  const countEl = document.getElementById('exp-count');
-  if (countEl) countEl.textContent = EXP_LOADED ? EXPIRING.length : '';
-  const hint = document.getElementById('exp-hint');
-  if (hint) hint.textContent = EXP_COLLAPSED ? 'tap to show' : 'tap to hide';
-  const chev = document.getElementById('exp-chev');
-  if (chev) chev.textContent = EXP_COLLAPSED ? '▼' : '▲';
-  if (EXP_COLLAPSED) { el.style.display = 'none'; return; }
-  el.style.display = '';
-  if (!EXP_LOADED) { el.innerHTML = '<div class="spin">Loading…</div>'; return; }
-  if (!EXPIRING.length) {
-    const html = '<div class="empty">Nothing expiring in the next 7 days.</div>';
-    if (lastExpiringHtml !== html) { el.innerHTML = html; lastExpiringHtml = html; }
-    return;
-  }
-  const shown = EXPIRING_ALL ? EXPIRING : EXPIRING.slice(0, 5);
-  const html = shown.map(c =>
-    '<div class="card client"><div class="row"><div class="grow">' +
+function renderKeySections() {
+  ['exp3', 'lowgb', 'expired'].forEach(which => {
+    const s = KEY_SECTIONS[which];
+    const el = document.getElementById(which + '-list');
+    if (!el) return;
+    const list = s.list();
+    const countEl = document.getElementById(which + '-count');
+    if (countEl) {
+      countEl.textContent = OVERVIEW_LOADED ? list.length : '';
+      countEl.style.display = OVERVIEW_LOADED && list.length ? '' : 'none';
+    }
+    const hint = document.getElementById(which + '-hint');
+    if (hint) hint.textContent = s.collapsed() ? 'tap to show' : 'tap to hide';
+    const chev = document.getElementById(which + '-chev');
+    if (chev) chev.textContent = s.collapsed() ? '▼' : '▲';
+    if (s.collapsed()) { el.style.display = 'none'; return; }
+    el.style.display = '';
+    if (!OVERVIEW_LOADED) { el.innerHTML = '<div class="spin">Loading…</div>'; return; }
+    if (!list.length) {
+      const html = '<div class="empty">' + s.empty + '</div>';
+      if (lastSectionHtml[which] !== html) { el.innerHTML = html; lastSectionHtml[which] = html; }
+      return;
+    }
+    const shown = s.all() ? list : list.slice(0, 5);
+    const html = shown.map(s.row).join('') + (!s.all() && list.length > 5
+      ? '<button class="see-all" onclick="KEY_SECTIONS[\'' + which + '\'].setAll(true);renderKeySections()">See all ' + list.length + ' →</button>'
+      : (s.all() && list.length > 5
+        ? '<button class="see-all" onclick="KEY_SECTIONS[\'' + which + '\'].setAll(false);renderKeySections()">Show less ↑</button>' : ''));
+    if (lastSectionHtml[which] !== html) { el.innerHTML = html; lastSectionHtml[which] = html; }
+  });
+}
+/* Shared action buttons for a key row on the dashboard (Renew / Swap /
+   Edit / Copy link). Names are escaped for the inline onclick. */
+function keyRowActions(c) {
+  const n = esc(c.name).replace(/'/g, "\\'");
+  const proto = c.protocol || 'outline';
+  return '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + n + '\', \'' + proto + '\')">Renew</button>' +
+    '<button class="btn ghost sm" onclick="swapKey(' + c.server_id + ', \'' + n + '\', this, \'' + proto + '\')">Swap</button>' +
+    '<button class="btn ghost sm" onclick="openEditModal(' + c.server_id + ', \'' + n + '\', ' + Math.round((c.limit || 0) / 1073741824) + ', \'' + nameDateISO(c.name) + '\', \'' + proto + '\')">Edit</button>' +
+    '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + n + '\', this, \'' + proto + '\')">Copy link</button>';
+}
+function expiringRowHtml(c) {
+  return '<div class="card client"><div class="row"><div class="grow">' +
     '<div class="name">' + esc(c.name) + '</div>' +
     '<div class="muted small">' + esc(c.server_name) + ' • expires ' + esc(c.expiry_h) +
     ' • ' + c.days_left + ' day' + (c.days_left === 1 ? '' : 's') + ' left</div></div>' +
     '<span class="status ' + c.status + '">' + c.status + '</span></div>' +
+    '<div class="actions">' + keyRowActions(c) + '</div></div>';
+}
+function lowGbRowHtml(c) {
+  return '<div class="card client"><div class="row"><div class="grow">' +
+    '<div class="name">' + esc(c.name) + '</div>' +
+    '<div class="muted small">' + esc(c.server_name) + ' • ' + esc(c.remaining_h) + ' left of ' + esc(c.limit_h) +
+    ' • exp ' + esc(c.expiry_h) + '</div></div>' +
+    '<span class="status ' + c.status + '">' + c.status + '</span></div>' +
+    '<div class="bar"><i style="width:' + c.pct + '%"></i></div>' +
+    '<div class="actions">' + keyRowActions(c) + '</div></div>';
+}
+function expiredRowHtml(c) {
+  const reason = c.expired_reason === 'gb'
+    ? 'GB used up (' + esc(c.used_h) + ' / ' + esc(c.limit_h) + ')'
+    : 'expired ' + esc(c.expiry_h);
+  return '<div class="card client"><div class="row"><div class="grow">' +
+    '<div class="name">' + esc(c.name) + '</div>' +
+    '<div class="muted small">' + esc(c.server_name) + ' • ' + reason + '</div></div>' +
+    '<span class="status expired">expired</span></div>' +
     '<div class="actions">' +
     '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', \'' + (c.protocol || 'outline') + '\')">Renew</button>' +
-    '<button class="btn ghost sm" onclick="swapKey(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this, \'' + (c.protocol || 'outline') + '\')">Swap</button>' +
     '<button class="btn ghost sm" onclick="openEditModal(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', ' + Math.round((c.limit || 0) / 1073741824) + ', \'' + nameDateISO(c.name) + '\', \'' + (c.protocol || 'outline') + '\')">Edit</button>' +
     '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this, \'' + (c.protocol || 'outline') + '\')">Copy link</button>' +
-    '</div></div>'
-  ).join('') + (!EXPIRING_ALL && EXPIRING.length > 5
-    ? '<button class="see-all" onclick="EXPIRING_ALL=true;renderExpiring()">See all ' + EXPIRING.length + ' →</button>'
-    : (EXPIRING_ALL && EXPIRING.length > 5
-      ? '<button class="see-all" onclick="EXPIRING_ALL=false;renderExpiring()">Show less ↑</button>' : ''));
-  if (lastExpiringHtml !== html) { el.innerHTML = html; lastExpiringHtml = html; }
+    '<button class="btn ghost sm red" onclick="deleteKey(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this, \'' + (c.protocol || 'outline') + '\')">Delete</button>' +
+    '</div></div>';
 }
 async function globalSearch() {
   const q = document.getElementById('q').value.trim();
@@ -480,26 +615,40 @@ function applyKeyPatch(serverId, oldName, patch) {
     }
     renderVlessClients();
   }
-  // dashboard "Expiring soon" rows use the same actions: keep them in sync
-  if (document.getElementById('expiring') && EXP_LOADED) {
-    if (patch.remove) {
-      EXPIRING = EXPIRING.filter(c => !(c.server_id === serverId && c.name === oldName));
-    } else {
-      const c = EXPIRING.find(x => x.server_id === serverId && x.name === oldName);
+  // dashboard key-overview rows use the same actions: keep them in sync.
+  // A patch can move a key OUT of a list (renewed / edited / swapped),
+  // never into one — the quiet overview re-fetch corrects any drift.
+  if (document.getElementById('exp3-list') && OVERVIEW_LOADED) {
+    const patchOne = (arr) => {
+      if (patch.remove) return arr.filter(c => !(c.server_id === serverId && c.name === oldName));
+      const c = arr.find(x => x.server_id === serverId && x.name === oldName);
       if (c) {
         if (patch.name) c.name = patch.name;
         if (patch.expiry != null) { c.expiry = patch.expiry; c.expiry_h = patch.expiry_h || c.expiry_h; }
-        if (patch.limit != null) c.limit = patch.limit;
+        if (patch.limit != null) { c.limit = patch.limit; c.limit_h = fmtGB(patch.limit); c.pct = c.limit ? Math.min(100, Math.round(c.used * 100 / c.limit)) : 0; }
+        if (patch.used != null) { c.used = patch.used; c.used_h = fmtGB(patch.used); c.pct = c.limit ? Math.min(100, Math.round(c.used * 100 / c.limit)) : 0; }
         if (patch.enable != null) c.enable = patch.enable;
         if (patch.status) c.status = patch.status;
       }
+      return arr;
+    };
+    const isExpired = (c) => (c.expiry && c.expiry <= now) || (c.limit && c.used >= c.limit);
+    const n3 = EXP3.length, nL = LOWGB.length, nX = EXPIRED.length;
+    EXP3 = patchOne(EXP3).filter(c => c.expiry && c.expiry - now <= 3 * 86400 && !isExpired(c));
+    LOWGB = patchOne(LOWGB).filter(c => c.limit && c.limit - c.used > 0 &&
+      c.limit - c.used <= 10 * 1073741824 && !isExpired(c));
+    EXPIRED = patchOne(EXPIRED).filter(isExpired);
+    if (OV_STATS) {
+      OV_STATS.expiring_3d = Math.max(0, (OV_STATS.expiring_3d || 0) - (n3 - EXP3.length));
+      OV_STATS.low_gb = Math.max(0, (OV_STATS.low_gb || 0) - (nL - LOWGB.length));
+      OV_STATS.expired = Math.max(0, (OV_STATS.expired || 0) - (nX - EXPIRED.length));
+      const setStat = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+      setStat('stat-expiring3', OV_STATS.expiring_3d);
+      setStat('stat-expired', OV_STATS.expired);
     }
-    // a renewed/edited key leaves the 7-day window — drop it from the list
-    EXPIRING = EXPIRING.filter(c => c.expiry && c.expiry - now <= 7 * 86400);
     EXP_COUNTS = {};
-    EXPIRING.forEach(c => EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1);
-    document.getElementById('stat-expiring').textContent = EXPIRING.length;
-    renderExpiring();
+    EXP3.forEach(c => EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1);
+    renderKeySections();
     renderServers();
   }
 }
@@ -552,7 +701,7 @@ function filteredVless() {
   const now = Date.now() / 1000;
   let list = ALL_VLESS.filter(c => c.name.toLowerCase().includes(f));
   if (FILTER_BY === 'expiring')
-    list = list.filter(c => c.expiry && c.expiry - now <= 7 * 86400);
+    list = list.filter(c => c.expiry && c.expiry - now <= 3 * 86400);
   if (FILTER_BY === 'high')
     list = list.filter(c => c.pct >= 70);
   if (SORT_BY === 'newest') {
@@ -580,10 +729,13 @@ function renderVlessClients() {
       const n = esc(c.name).replace(/'/g, "\\'");
       const toggleLabel = c.enable ? 'Disable' : 'Enable';
       const isNew = isNewKey(c);
+      const checked = SEL.has('vless:' + c.name) ? ' checked' : '';
       return '<div class="card client' + (isExpiringToday(c) ? ' expiring-today' : '') + (isNew ? ' is-new' : '') + '">' +
-      '<div class="row"><div class="grow"><div class="name">' + esc(c.name) +
+      '<div class="row"><input type="checkbox" class="key-check" data-proto="vless" data-name="' + esc(c.name) + '"' + checked + ' onchange="toggleSelect(this)">' +
+      '<div class="grow"><div class="name">' + esc(c.name) +
       '<span class="badge-vless">VLESS</span>' + (isNew ? '<span class="badge-new">NEW</span>' : '') + '</div></div>' +
-      '<span class="status ' + c.status + '">' + c.status + '</span></div>' +
+      '<div class="badges"><span class="status ' + c.status + '">' + c.status + '</span>' +
+      onlinePillHtml(c) + '</div></div>' +
       '<div class="muted small" style="margin-top:4px">' + esc(c.used_h) + ' / ' + esc(c.limit_h) + ' • exp ' + esc(c.expiry_h) + '</div>' +
       '<div class="bar"><i style="width:' + c.pct + '%"></i></div>' +
       '<div class="actions">' +
@@ -599,6 +751,161 @@ function renderVlessClients() {
   }
   document.getElementById('vless-info').textContent =
     list.length + ' VLESS key' + (list.length === 1 ? '' : 's');
+  updateSelBar();
+}
+/* v6.1: Online / Offline pill. "online" is present only when the panel
+   actually supplied it — absent means unknown, and no pill is shown
+   (never "everyone Offline" on a failed read). Online is NOT the same
+   as Active: a disabled key can still be online, an enabled key offline. */
+function onlinePillHtml(c) {
+  if (c.online === true) return '<span class="pill-online">● Online</span>';
+  if (c.online === false) return '<span class="pill-offline">○ Offline</span>';
+  return '';
+}
+/* v6.1: bulk selection — "proto:name" keys, kept across re-renders. */
+let SEL = new Set();
+function toggleSelect(cb) {
+  const k = cb.dataset.proto + ':' + cb.dataset.name;
+  if (cb.checked) SEL.add(k); else SEL.delete(k);
+  updateSelBar();
+}
+function selFiltered() {
+  // every currently-filtered key on this server page, both protocols
+  const out = [];
+  if (typeof ALL_CLIENTS !== 'undefined')
+    filteredClients().forEach(c => out.push({name: c.name, protocol: 'outline'}));
+  if (HAS_VLESS && typeof ALL_VLESS !== 'undefined')
+    filteredVless().forEach(c => out.push({name: c.name, protocol: 'vless'}));
+  return out;
+}
+function toggleSelectAll(checked) {
+  const items = selFiltered();
+  if (checked) items.forEach(it => SEL.add(it.protocol + ':' + it.name));
+  else items.forEach(it => SEL.delete(it.protocol + ':' + it.name));
+  renderClients();
+  renderVlessClients();
+  updateSelBar();
+}
+function updateSelBar() {
+  const bar = document.getElementById('sel-bar');
+  if (!bar) return; // not on a server page
+  const items = selFiltered();
+  const total = items.length;
+  const n = [...SEL].filter(k => items.some(it => it.protocol + ':' + it.name === k)).length;
+  document.getElementById('sel-all-label').textContent = 'Select all (' + total + ')';
+  const allCb = document.getElementById('sel-all');
+  allCb.checked = total > 0 && n === total;
+  const btn = document.getElementById('del-sel-btn');
+  btn.style.display = SEL.size ? '' : 'none';
+  btn.textContent = 'Delete selected (' + SEL.size + ')';
+}
+async function deleteSelected() {
+  const btn = document.getElementById('del-sel-btn');
+  const items = [...SEL].map(k => {
+    const i = k.indexOf(':');
+    return {protocol: k.slice(0, i), name: k.slice(i + 1)};
+  });
+  if (!items.length) return;
+  // two-click confirm showing the count — never delete without it.
+  armOrRun('bulk-del:' + items.length, btn, 'Delete ' + items.length + '?', async () => {
+    clearQuietSync();
+    try {
+      const j = await api('/api/server/' + SERVER_ID + '/bulk-delete-key', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({items})});
+      (j.deleted || []).forEach(name => {
+        applyKeyPatch(SERVER_ID, name, {remove: true});
+      });
+      SEL.clear();
+      updateSelBar();
+      toast('Deleted ' + (j.deleted || []).length + ' keys' +
+        (j.failed && j.failed.length ? ' • ' + j.failed.length + ' failed' : ''));
+      scheduleQuietSync(SERVER_ID);
+    } catch (e) { toast('Bulk delete failed: ' + e.message); }
+  });
+}
+/* v6.1: bulk create modal. */
+let BULK_LAST_LINKS = [];
+function openBulkCreate() {
+  document.getElementById('bulk-form').style.display = '';
+  document.getElementById('bulk-result').style.display = 'none';
+  document.getElementById('bulk-result').innerHTML = '';
+  const pw = document.getElementById('bulk-proto-wrap');
+  if (pw) pw.style.display = HAS_VLESS ? '' : 'none';
+  document.getElementById('bulk-modal').classList.add('open');
+  document.getElementById('bulk-base').focus();
+}
+function closeBulkCreate() {
+  document.getElementById('bulk-modal').classList.remove('open');
+}
+async function submitBulkCreate() {
+  clearQuietSync();
+  const base = document.getElementById('bulk-base').value.trim();
+  const count = parseInt(document.getElementById('bulk-count').value, 10);
+  const gbRaw = (document.getElementById('bulk-gb').value || '').trim();
+  const dateRaw = (document.getElementById('bulk-date').value || '').trim();
+  const months = parseInt(document.querySelector('#bulk-months button.sel').dataset.m, 10);
+  const protoBtn = document.querySelector('#bulk-proto .sel');
+  const proto = protoBtn ? protoBtn.dataset.p : 'outline';
+  const btn = document.getElementById('bulk-submit');
+  if (!base) { toast('Enter a base name'); return; }
+  if (!count || count < 1 || count > 50) { toast('Count must be 1–50'); return; }
+  if (gbRaw !== '') {
+    const gb = parseFloat(gbRaw);
+    if (isNaN(gb) || gb <= 0) { toast('Custom GB must be a positive number'); return; }
+  }
+  if (dateRaw !== '') {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateRaw)) { toast('Pick a valid date'); return; }
+    const picked = new Date(dateRaw + 'T00:00:00');
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    if (picked < today) { toast('Expiry date is in the past'); return; }
+  }
+  const body = {base_name: base, count, months, protocol: proto};
+  if (gbRaw !== '') body.gb = parseFloat(gbRaw);
+  if (dateRaw !== '') body.expiry_date = dateRaw;
+  btn.disabled = true; btn.textContent = 'Creating…';
+  try {
+    const j = await api('/api/server/' + SERVER_ID + '/bulk-add-key', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)});
+    BULK_LAST_LINKS = j.created.map(k => k.link);
+    document.getElementById('bulk-form').style.display = 'none';
+    const res = document.getElementById('bulk-result');
+    res.style.display = '';
+    res.innerHTML =
+      '<p class="muted">Created <b style="color:var(--text)">' + j.created_count +
+      ' keys</b> • ' + esc(String(j.gb)) + ' GB • exp ' + esc(j.expiry_h) + '</p>' +
+      j.created.map(k =>
+        '<div class="linkbox" style="margin:6px 0">' + esc(k.name) +
+        '<br><span class="muted small">' + esc(k.link) + '</span></div>'
+      ).join('') +
+      '<button class="btn block" onclick="copyBulkLinks()">Copy all links</button>' +
+      '<div style="height:10px"></div>' +
+      '<button class="btn ghost block" onclick="closeBulkCreate()">Done</button>';
+    toast('Created ' + j.created_count + ' keys');
+    // the new keys appear at the top at once (Newest sort + NEW badge)
+    const now = Math.floor(Date.now() / 1000);
+    j.created.forEach(k => {
+      const c = {name: k.name, server_id: SERVER_ID, status: 'active', enable: true,
+        used: 0, used_h: '0 GB', limit: j.limit, limit_h: fmtGB(j.limit),
+        expiry: 0, expiry_h: j.expiry_h, pct: 0, created_at: now,
+        protocol: k.protocol};
+      if (k.protocol === 'vless' && typeof ALL_VLESS !== 'undefined') ALL_VLESS.unshift(c);
+      else if (typeof ALL_CLIENTS !== 'undefined') ALL_CLIENTS.unshift(c);
+    });
+    if (typeof ALL_CLIENTS !== 'undefined') {
+      document.getElementById('count-all').textContent = ALL_CLIENTS.length;
+      SHOWN = PAGE_SIZE;
+      renderClients();
+    }
+    if (HAS_VLESS) renderVlessClients();
+    scheduleQuietSync(SERVER_ID);
+  } catch (e) { toast('Bulk create failed: ' + e.message); }
+  btn.disabled = false; btn.textContent = 'Create keys';
+}
+function copyBulkLinks() {
+  if (!BULK_LAST_LINKS.length) return;
+  copyText(BULK_LAST_LINKS.join('\n'), BULK_LAST_LINKS.length + ' links copied');
 }
 function nameFromPastedKey(text) {
   // A pasted ss:// or vless:// link -> the key name from its #fragment,
@@ -623,7 +930,7 @@ function filteredClients() {
   const now = Date.now() / 1000;
   let list = ALL_CLIENTS.filter(c => c.name.toLowerCase().includes(f));
   if (FILTER_BY === 'expiring')
-    list = list.filter(c => c.expiry && c.expiry - now <= 7 * 86400);
+    list = list.filter(c => c.expiry && c.expiry - now <= 3 * 86400);
   if (FILTER_BY === 'high')
     list = list.filter(c => c.pct >= 70);
   if (SORT_BY === 'newest') {
@@ -662,12 +969,15 @@ function renderClients() {
       const n = esc(c.name).replace(/'/g, "\\'");
       const toggleLabel = c.enable ? 'Disable' : 'Enable';
       const isNew = isNewKey(c);
+      const checked = SEL.has('outline:' + c.name) ? ' checked' : '';
       // v4 cleaner card: name (+ NEW badge) and status on one row,
       // usage line below, slim full-width bar, then the buttons.
       return '<div class="card client' + (isExpiringToday(c) ? ' expiring-today' : '') + (isNew ? ' is-new' : '') + '">' +
-      '<div class="row"><div class="grow"><div class="name">' + esc(c.name) +
+      '<div class="row"><input type="checkbox" class="key-check" data-proto="outline" data-name="' + esc(c.name) + '"' + checked + ' onchange="toggleSelect(this)">' +
+      '<div class="grow"><div class="name">' + esc(c.name) +
       (isNew ? '<span class="badge-new">NEW</span>' : '') + '</div></div>' +
-      '<span class="status ' + c.status + '">' + c.status + '</span></div>' +
+      '<div class="badges"><span class="status ' + c.status + '">' + c.status + '</span>' +
+      onlinePillHtml(c) + '</div></div>' +
       '<div class="muted small" style="margin-top:4px">' + esc(c.used_h) + ' / ' + esc(c.limit_h) + ' • exp ' + esc(c.expiry_h) + '</div>' +
       '<div class="bar"><i style="width:' + c.pct + '%"></i></div>' +
       '<div class="actions">' +
@@ -684,6 +994,7 @@ function renderClients() {
     'Showing ' + Math.min(SHOWN, list.length) + ' of ' + list.length + ' keys';
   document.getElementById('load-more').style.display =
     (SHOWN < list.length) ? '' : 'none';
+  updateSelBar();
 }
 function loadMoreClients() { SHOWN += PAGE_SIZE; renderClients(); }
 function filterClients() { SHOWN = PAGE_SIZE; renderClients(); }
@@ -1075,7 +1386,7 @@ function initDashboardSmart() {
   if (snap && snap.populated) {
     const main = document.querySelector('main');
     if (main) {
-      lastServersHtml = null; lastExpiringHtml = null;
+      lastServersHtml = null; lastSectionHtml.exp3 = null; lastSectionHtml.lowgb = null; lastSectionHtml.expired = null;
       main.innerHTML = snap.html;
       const q = document.getElementById('q');
       if (q && snap.q) q.value = snap.q;
@@ -1086,7 +1397,7 @@ function initDashboardSmart() {
       // restored EXPANDED set says collapsed; without this the old view
       // flashed for a second until the quiet refresh re-rendered it.
       renderServers();
-      renderExpiring();
+      renderKeySections();
     }
     initDashboardQuiet();
   } else {
@@ -1099,7 +1410,7 @@ function swapMain(url, data, push) {
   // v4: the renderers skip DOM writes when the HTML is unchanged — but a
   // tab swap replaces the DOM with the template's spinner HTML, so the
   // "unchanged" cache is stale here and must be reset.
-  lastServersHtml = null; lastExpiringHtml = null;
+  lastServersHtml = null; lastSectionHtml.exp3 = null; lastSectionHtml.lowgb = null; lastSectionHtml.expired = null;
   main.innerHTML = data.html;
   if (data.populated) { // restore what the user had typed before the switch
     const q = document.getElementById('q');
