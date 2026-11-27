@@ -33,51 +33,63 @@ function esc(s) {
 
 /* ---------------- dashboard ---------------- */
 let SERVERS = [], HEALTH = {};
-let IS_ADMIN = false; // v6.1: set from /api/servers — admin gets owner grouping
-// v6.1: the key-overview scan (one pass) feeds the 4 stat cards + the
-// three key lists. EXP_COUNTS feeds the "N expiring" note on server cards
-// (expiring within 3 days now, not 7).
-let EXP3 = [], EXP3_ALL = false;
-let LOWGB = [], LOWGB_ALL = false;
-let EXPIRED = [], EXPIRED_ALL = false;
+// v6.1.1 (DEFECT 1 root fix): the role + username are baked into the
+// page by the server (base.html data-role / data-user) and read HERE,
+// at script load — before any render. The old code set IS_ADMIN only
+// inside loadDashboard() from /api/servers, but the snapshot-restore
+// path (initDashboardSmart -> initDashboardQuiet) never fetches
+// /api/servers, so after a fresh login IS_ADMIN stayed false whenever
+// a sessionStorage snapshot existed and the admin got country grouping.
+// loadDashboard() still refreshes IS_ADMIN from the API (authoritative).
+const BODY_ROLE = (document.body && document.body.dataset.role) || '';
+const BODY_USER = (document.body && document.body.dataset.user) || '';
+let IS_ADMIN = BODY_ROLE === 'admin';
+// v6.1.1: the key-overview scan (one pass) feeds the 4 stat cards +
+// the per-owner key sections. OV_BY_OWNER[owner] = {totals, expiring,
+// low_gb, expired} — one bucket per owner, lists capped at 100, totals
+// are the TRUE counts. EXP_COUNTS feeds the "N expiring" note on
+// server cards (expiring within 3 days now, not 7).
+let OV_BY_OWNER = {};
 let OV_STATS = null, OVERVIEW_LOADED = false;
 let EXP_COUNTS = {};
-// v6.1: all three sections start COLLAPSED (tap the bar to show). The
-// choice is remembered on this device, per section.
-let EXP3_COLLAPSED = localStorage.getItem('khp_exp3_collapsed') !== '0';
-let LOWGB_COLLAPSED = localStorage.getItem('khp_lowgb_collapsed') !== '0';
-let EXPIRED_COLLAPSED = localStorage.getItem('khp_expired_collapsed') !== '0';
+// v6.1.1: the three key sections are per-owner now (MY SERVERS / one
+// channel / a reseller's own servers). Each starts COLLAPSED; the
+// choice is remembered on this device, per owner + section.
+let SEC_COLLAPSED = {}; // 'owner|which' -> bool (default true)
+let SEC_ALL = new Set(); // 'owner|which' expanded to the capped-100 list
 let EXPANDED = new Set(); // v5: country groups start COLLAPSED on login — tap a country to expand
 let CHECKED_AT = 0;
 let DASH_TIMER = null; // 60s quiet auto-refresh timer (cleared on tab switch)
 let NAV_CACHE = {}; // prefetched tab HTML, for instant tab switching
 let lastServersHtml = null;
-const lastSectionHtml = {exp3: null, lowgb: null, expired: null};
-// v6.1: the tab cache key is bumped (v1 -> v2) because the dashboard
-// template changed shape (new stat cards + three key sections) — an old
-// snapshot would restore HTML the new renderers cannot fill.
+// v6.1.1: the tab cache key is bumped (v2 -> v3) because the dashboard
+// template changed shape again (sections moved inside owner groups) —
+// and, crucially, the snapshot is now KEYED BY USER: restoring an
+// admin's snapshot into a reseller's session (same tab, new login)
+// leaked the admin's view. A snapshot restores only for its own user.
 try {
-  const _s = JSON.parse(sessionStorage.getItem('khp_nav_cache_v2') || 'null');
-  if (_s) {
+  const _s = JSON.parse(sessionStorage.getItem('khp_nav_cache_v3') || 'null');
+  if (_s && _s.user === BODY_USER) {
     NAV_CACHE = _s.nav || {};
     SERVERS = _s.servers || [];
     HEALTH = _s.health || {};
     CHECKED_AT = _s.checkedAt || 0;
-    EXP3 = _s.exp3 || [];
-    LOWGB = _s.lowgb || [];
-    EXPIRED = _s.expired || [];
+    OV_BY_OWNER = _s.byOwner || {};
     OV_STATS = _s.ovStats || null;
     OVERVIEW_LOADED = !!_s.ovLoaded;
     EXPANDED = new Set(_s.expanded || []);
     EXP_COUNTS = {};
-    EXP3.forEach(c => { EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1; });
+    Object.values(OV_BY_OWNER).forEach(o => {
+      (o.expiring || []).forEach(c => { EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1; });
+    });
   }
 } catch (e) { /* private mode / quota: in-memory cache still works */ }
 function persistTabCache() {
   try {
-    sessionStorage.setItem('khp_nav_cache_v2', JSON.stringify({
+    sessionStorage.setItem('khp_nav_cache_v3', JSON.stringify({
+      user: BODY_USER,
       nav: NAV_CACHE, servers: SERVERS, health: HEALTH,
-      checkedAt: CHECKED_AT, exp3: EXP3, lowgb: LOWGB, expired: EXPIRED,
+      checkedAt: CHECKED_AT, byOwner: OV_BY_OWNER,
       ovStats: OV_STATS, ovLoaded: OVERVIEW_LOADED,
       expanded: [...EXPANDED]}));
   } catch (e) { /* ignore */ }
@@ -201,17 +213,17 @@ async function refreshDashboardQuiet() {
     snapshotTab('/dashboard');
   } catch (e) { /* quiet: a failed background tick just tries again next minute */ }
 }
-/* v6.1: one overview payload feeds the blue/yellow/red stat cards and
-   the three key sections. The server-card "N expiring" notes come from
-   the 3-day list. */
+/* v6.1.1: one overview payload feeds the blue/yellow/red stat cards
+   (global TRUE totals) and the per-owner key sections. The server-card
+   "N expiring" notes come from the combined per-owner 3-day lists. */
 function applyOverview(j) {
   OVERVIEW_LOADED = true;
   OV_STATS = j.stats || null;
-  EXP3 = j.expiring || [];
-  LOWGB = j.low_gb || [];
-  EXPIRED = j.expired || [];
+  OV_BY_OWNER = j.by_owner || {};
   EXP_COUNTS = {};
-  EXP3.forEach(c => EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1);
+  Object.values(OV_BY_OWNER).forEach(o => {
+    (o.expiring || []).forEach(c => { EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1; });
+  });
   const setStat = (id, v) => {
     const el = document.getElementById(id);
     if (el) el.textContent = v;
@@ -219,8 +231,7 @@ function applyOverview(j) {
   setStat('stat-keys', (j.stats.active || 0).toLocaleString('en-US'));
   setStat('stat-expiring3', j.stats.expiring_3d || 0);
   setStat('stat-expired', j.stats.expired || 0);
-  renderKeySections();
-  renderServers(); // expiring counts feed the server cards
+  renderServers(); // sections live inside the server list now
 }
 function initDashboard() {
   if (DASH_TIMER) { clearInterval(DASH_TIMER); DASH_TIMER = null; }
@@ -336,7 +347,7 @@ function renderServers() {
     // a filter forces every group open so matches are always findable
     const collapsed = f ? false : !EXPANDED.has(g);
     const chev = collapsed ? '▼' : '▲';
-    let html = '<div class="group-h" onclick="toggleGroup(\'' + esc(g) + '\')">' +
+    let html = '<div class="group-h" data-group="' + esc(g) + '" onclick="toggleGroup(\'' + esc(g) + '\')">' +
       '<span class="gflag">' + flagFor(g === 'Other' ? '' : g) + '</span>' +
       '<b>' + esc(countryName(g)) + '</b>' +
       groupMetaHtml(items) +
@@ -344,14 +355,23 @@ function renderServers() {
     if (collapsed) return html;
     html += items.map(serverRowHtml).join('');
     return html;
-  }).join('');
+  }).join('') +
+  // v6.1.1: reseller dashboards end with the three key sections,
+  // scoped to ALL of the reseller's own servers (same pattern as the
+  // admin's MY SERVERS group, below the country groups).
+  ownerSectionsHtml(list.length ? list[0].owner : '');
   // v4: only touch the DOM when the HTML actually changed — replacing
   // identical markup every 60s is what made the list visibly flicker.
   if (lastServersHtml !== html) { el.innerHTML = html; lastServersHtml = html; }
 }
-/* v6.1: admin owner grouping. MY SERVERS (his 12) expanded by default;
-   OTHER (the 42 reseller servers) collapsed by default; inside it one
-   collapsed sub-group per reseller, headed by their channel name. */
+/* v6.1.1: admin owner grouping — nested drill-down.
+   MY SERVERS (his 12) expanded by default; OTHER (the 42 reseller
+   servers) collapsed by default; inside it one collapsed sub-group
+   per reseller, headed by their channel name. Tapping a top group
+   opens SG / JP / TH country groups inside it (collapsed by default);
+   tapping a channel opens a SERVERS heading with that channel's
+   country groups. Below each owner/channel's country groups sit the
+   three key sections, scoped to ALL of that owner's servers. */
 function renderServersByOwner(el, list, f) {
   const mine = list.filter(s => s.owner === 'admin');
   const others = list.filter(s => s.owner !== 'admin');
@@ -366,10 +386,40 @@ function renderServersByOwner(el, list, f) {
     personOrder.map(o => ({owner: o, servers: persons[o]})));
   if (lastServersHtml !== html) { el.innerHTML = html; lastServersHtml = html; }
 }
+/* Country groups inside one owner/channel: SG / JP / TH first, then
+   the rest. keyPrefix is 'owner:admin', 'owner:sth28' (channel) or ''
+   for a reseller's own dashboard (plain country keys, as before). */
+function countryGroupsHtml(servers, f, keyPrefix) {
+  const groups = {};
+  servers.forEach(s => {
+    const g = s.country || 'Other';
+    (groups[g] = groups[g] || []).push(s);
+  });
+  const order = Object.keys(groups).sort((a, b) => {
+    const ia = COUNTRY_ORDER.indexOf(countryName(a)), ib = COUNTRY_ORDER.indexOf(countryName(b));
+    if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    return a.localeCompare(b);
+  });
+  return order.map(g => {
+    const items = groups[g];
+    const key = keyPrefix ? keyPrefix + ':' + g : g;
+    // a filter forces every group open so matches are always findable
+    const collapsed = f ? false : !EXPANDED.has(key);
+    const chev = collapsed ? '▼' : '▲';
+    let html = '<div class="group-h" data-group="' + esc(key) + '" onclick="toggleGroup(\'' + esc(key) + '\')">' +
+      '<span class="gflag">' + flagFor(g === 'Other' ? '' : g) + '</span>' +
+      '<b>' + esc(countryName(g)) + '</b>' +
+      groupMetaHtml(items) +
+      '<span class="chev">' + chev + '</span></div>';
+    if (collapsed) return html;
+    html += items.map(serverRowHtml).join('');
+    return html;
+  }).join('');
+}
 function ownerGroupHtml(key, title, servers, f, persons) {
   const collapsed = f ? false : !EXPANDED.has(key);
   const chev = collapsed ? '▼' : '▲';
-  let html = '<div class="group-h" onclick="toggleGroup(\'' + esc(key) + '\')">' +
+  let html = '<div class="group-h" data-group="' + esc(key) + '" onclick="toggleGroup(\'' + esc(key) + '\')">' +
     '<b>' + esc(title) + '</b>' + groupMetaHtml(servers) +
     '<span class="chev">' + chev + '</span></div>';
   if (collapsed) return html;
@@ -378,16 +428,18 @@ function ownerGroupHtml(key, title, servers, f, persons) {
       const pkey = 'owner:' + p.owner;
       const pCollapsed = f ? false : !EXPANDED.has(pkey);
       const pchev = pCollapsed ? '▼' : '▲';
-      let ph = '<div class="person-h" onclick="toggleGroup(\'' + esc(pkey) + '\')">' +
+      let ph = '<div class="person-h" data-group="' + esc(pkey) + '" onclick="toggleGroup(\'' + esc(pkey) + '\')">' +
         '<b>' + esc(p.servers[0].owner_display || p.owner) + '</b>' +
         groupMetaHtml(p.servers) +
         '<span class="chev">' + pchev + '</span></div>';
       if (pCollapsed) return ph;
       return ph + '<div class="person-body">' +
-        p.servers.map(serverRowHtml).join('') + '</div>';
+        '<div class="person-servers-h">SERVERS</div>' +
+        countryGroupsHtml(p.servers, f, pkey) +
+        ownerSectionsHtml(p.owner) + '</div>';
     }).join('');
   } else {
-    html += servers.map(serverRowHtml).join('');
+    html += countryGroupsHtml(servers, f, key) + ownerSectionsHtml('admin');
   }
   return html;
 }
@@ -399,61 +451,89 @@ function toggleGroup(g) {
   snapshotTab('/dashboard');
 }
 function filterServers() { renderServers(); }
-/* v6.1: the three dashboard key sections — EXPIRING IN 3 DAYS (yellow),
-   LOW GB (orange), EXPIRED KEYS (red). Each starts COLLAPSED; the choice
-   is remembered on this device, per section. */
-const KEY_SECTIONS = {
-  exp3: {list: () => EXP3, collapsed: () => EXP3_COLLAPSED,
-         setCollapsed: v => { EXP3_COLLAPSED = v; localStorage.setItem('khp_exp3_collapsed', v ? '1' : '0'); },
-         all: () => EXP3_ALL, setAll: v => { EXP3_ALL = v; },
-         empty: 'Nothing expiring in the next 3 days.',
-         row: expiringRowHtml},
-  lowgb: {list: () => LOWGB, collapsed: () => LOWGB_COLLAPSED,
-          setCollapsed: v => { LOWGB_COLLAPSED = v; localStorage.setItem('khp_lowgb_collapsed', v ? '1' : '0'); },
-          all: () => LOWGB_ALL, setAll: v => { LOWGB_ALL = v; },
-          empty: 'No keys under 10 GB left.',
-          row: lowGbRowHtml},
-  expired: {list: () => EXPIRED, collapsed: () => EXPIRED_COLLAPSED,
-            setCollapsed: v => { EXPIRED_COLLAPSED = v; localStorage.setItem('khp_expired_collapsed', v ? '1' : '0'); },
-            all: () => EXPIRED_ALL, setAll: v => { EXPIRED_ALL = v; },
-            empty: 'No expired keys.',
-            row: expiredRowHtml},
+/* v6.1.1: the three key sections — EXPIRING IN 3 DAYS (yellow),
+   LOW GB (orange), EXPIRED KEYS (red) — live INSIDE one owner/channel
+   group, as siblings BELOW its SG/JP/TH country groups, scoped to ALL
+   of that owner's servers. Each starts COLLAPSED; the choice is
+   remembered on this device, per owner + section. The header badge
+   shows the owner's TRUE total (from /api/key-overview by_owner);
+   the list itself is capped at 100 rows with a "See all N" button. */
+const SEC_META = {
+  exp3: {title: 'Expiring in 3 days', cls: 'sec-exp3', badge: 'badge-exp',
+         listKey: 'expiring',
+         empty: 'Nothing expiring in the next 3 days.', row: expiringRowHtml},
+  lowgb: {title: 'Low GB — under 10 GB left', cls: 'sec-lowgb', badge: 'badge-lowgb',
+          listKey: 'low_gb',
+          empty: 'No keys under 10 GB left.', row: lowGbRowHtml},
+  expired: {title: 'Expired keys', cls: 'sec-expired', badge: 'badge-expired',
+            listKey: 'expired',
+            empty: 'No expired keys.', row: expiredRowHtml},
 };
-function toggleKeySection(which) {
-  const s = KEY_SECTIONS[which];
-  s.setCollapsed(!s.collapsed());
-  renderKeySections();
+const SEC_WHICH = ['exp3', 'lowgb', 'expired'];
+function secKey(owner, which) { return owner + '|' + which; }
+function secCollapsed(owner, which) {
+  const k = secKey(owner, which);
+  if (!(k in SEC_COLLAPSED)) {
+    // v6.1.1: the preference key is scoped by the LOGGED-IN user too —
+    // otherwise an admin previewing a channel's sections on this device
+    // would flip the same sections for the reseller's own login
+    // (same cross-user leak family as defect 1).
+    SEC_COLLAPSED[k] = localStorage.getItem('khp_sec_' + BODY_USER + '_' + owner + '_' + which + '_collapsed') !== '0';
+  }
+  return SEC_COLLAPSED[k];
 }
-function renderKeySections() {
-  ['exp3', 'lowgb', 'expired'].forEach(which => {
-    const s = KEY_SECTIONS[which];
-    const el = document.getElementById(which + '-list');
-    if (!el) return;
-    const list = s.list();
-    const countEl = document.getElementById(which + '-count');
-    if (countEl) {
-      countEl.textContent = OVERVIEW_LOADED ? list.length : '';
-      countEl.style.display = OVERVIEW_LOADED && list.length ? '' : 'none';
+function toggleOwnerSection(owner, which) {
+  const k = secKey(owner, which);
+  const v = !secCollapsed(owner, which);
+  SEC_COLLAPSED[k] = v;
+  localStorage.setItem('khp_sec_' + BODY_USER + '_' + owner + '_' + which + '_collapsed', v ? '1' : '0');
+  renderServers();
+}
+function toggleOwnerSectionAll(owner, which, showAll) {
+  const k = secKey(owner, which);
+  if (showAll) SEC_ALL.add(k); else SEC_ALL.delete(k);
+  renderServers();
+}
+function ownerSectionsHtml(owner) {
+  if (!owner) return '';
+  const o = OV_BY_OWNER[owner];
+  const totals = o ? o.totals : {expiring_3d: 0, low_gb: 0, expired: 0};
+  return SEC_WHICH.map(which => {
+    const m = SEC_META[which];
+    const total = totals[which === 'exp3' ? 'expiring_3d' : which === 'lowgb' ? 'low_gb' : 'expired'];
+    // the payload lists are keyed 'expiring' / 'low_gb' / 'expired',
+    // NOT by the section id ('exp3' / 'lowgb') — see SEC_META.listKey.
+    const list = o ? (o[m.listKey] || []) : [];
+    const collapsed = secCollapsed(owner, which);
+    const all = SEC_ALL.has(secKey(owner, which));
+    const badge = (OVERVIEW_LOADED && total)
+      ? '<span class="' + m.badge + '">' + total + '</span>' : '';
+    let h = '<div class="sec-head owner-sec" data-owner="' + esc(owner) + '" data-which="' + which +
+      '" onclick="toggleOwnerSection(\'' + esc(owner) + '\', \'' + which + '\')">' +
+      '<h2 class="sec ' + m.cls + '">' + m.title + '</h2>' +
+      '<span class="muted small">' + (collapsed ? 'tap to show' : 'tap to hide') + '</span>' +
+      badge +
+      '<span class="chev">' + (collapsed ? '▼' : '▲') + '</span></div>';
+    if (collapsed) return h;
+    let body;
+    if (!OVERVIEW_LOADED) {
+      body = '<div class="spin">Loading…</div>';
+    } else if (!list.length) {
+      body = '<div class="empty">' + m.empty + '</div>';
+    } else {
+      const shown = all ? list : list.slice(0, 5);
+      body = shown.map(m.row).join('');
+      if (!all && list.length > 5) {
+        body += '<button class="see-all" onclick="toggleOwnerSectionAll(\'' + esc(owner) + '\', \'' + which + '\', true)">See all ' + total + ' →</button>';
+      } else if (all && list.length > 5) {
+        body += '<button class="see-all" onclick="toggleOwnerSectionAll(\'' + esc(owner) + '\', \'' + which + '\', false)">Show less ↑</button>';
+      }
+      if (all && list.length < total) {
+        body += '<div class="muted small" style="text-align:center;padding:6px 0">Showing ' + list.length + ' of ' + total + '</div>';
+      }
     }
-    const hint = document.getElementById(which + '-hint');
-    if (hint) hint.textContent = s.collapsed() ? 'tap to show' : 'tap to hide';
-    const chev = document.getElementById(which + '-chev');
-    if (chev) chev.textContent = s.collapsed() ? '▼' : '▲';
-    if (s.collapsed()) { el.style.display = 'none'; return; }
-    el.style.display = '';
-    if (!OVERVIEW_LOADED) { el.innerHTML = '<div class="spin">Loading…</div>'; return; }
-    if (!list.length) {
-      const html = '<div class="empty">' + s.empty + '</div>';
-      if (lastSectionHtml[which] !== html) { el.innerHTML = html; lastSectionHtml[which] = html; }
-      return;
-    }
-    const shown = s.all() ? list : list.slice(0, 5);
-    const html = shown.map(s.row).join('') + (!s.all() && list.length > 5
-      ? '<button class="see-all" onclick="KEY_SECTIONS[\'' + which + '\'].setAll(true);renderKeySections()">See all ' + list.length + ' →</button>'
-      : (s.all() && list.length > 5
-        ? '<button class="see-all" onclick="KEY_SECTIONS[\'' + which + '\'].setAll(false);renderKeySections()">Show less ↑</button>' : ''));
-    if (lastSectionHtml[which] !== html) { el.innerHTML = html; lastSectionHtml[which] = html; }
-  });
+    return h + '<div class="owner-sec-list" data-owner="' + esc(owner) + '" data-which="' + which + '">' + body + '</div>';
+  }).join('');
 }
 /* Shared action buttons for a key row on the dashboard (Renew / Swap /
    Edit / Copy link). Names are escaped for the inline onclick. */
@@ -618,7 +698,7 @@ function applyKeyPatch(serverId, oldName, patch) {
   // dashboard key-overview rows use the same actions: keep them in sync.
   // A patch can move a key OUT of a list (renewed / edited / swapped),
   // never into one — the quiet overview re-fetch corrects any drift.
-  if (document.getElementById('exp3-list') && OVERVIEW_LOADED) {
+  if (document.getElementById('server-list') && OVERVIEW_LOADED) {
     const patchOne = (arr) => {
       if (patch.remove) return arr.filter(c => !(c.server_id === serverId && c.name === oldName));
       const c = arr.find(x => x.server_id === serverId && x.name === oldName);
@@ -633,22 +713,34 @@ function applyKeyPatch(serverId, oldName, patch) {
       return arr;
     };
     const isExpired = (c) => (c.expiry && c.expiry <= now) || (c.limit && c.used >= c.limit);
-    const n3 = EXP3.length, nL = LOWGB.length, nX = EXPIRED.length;
-    EXP3 = patchOne(EXP3).filter(c => c.expiry && c.expiry - now <= 3 * 86400 && !isExpired(c));
-    LOWGB = patchOne(LOWGB).filter(c => c.limit && c.limit - c.used > 0 &&
-      c.limit - c.used <= 10 * 1073741824 && !isExpired(c));
-    EXPIRED = patchOne(EXPIRED).filter(isExpired);
+    let d3 = 0, dL = 0, dX = 0;
+    Object.values(OV_BY_OWNER).forEach(o => {
+      const n3 = o.expiring.length, nL = o.low_gb.length, nX = o.expired.length;
+      o.expiring = patchOne(o.expiring).filter(c => c.expiry && c.expiry - now <= 3 * 86400 && !isExpired(c));
+      o.low_gb = patchOne(o.low_gb).filter(c => c.limit && c.limit - c.used > 0 &&
+        c.limit - c.used <= 10 * 1073741824 && !isExpired(c));
+      o.expired = patchOne(o.expired).filter(isExpired);
+      d3 += n3 - o.expiring.length;
+      dL += nL - o.low_gb.length;
+      dX += nX - o.expired.length;
+      if (o.totals) {
+        o.totals.expiring_3d = Math.max(0, (o.totals.expiring_3d || 0) - (n3 - o.expiring.length));
+        o.totals.low_gb = Math.max(0, (o.totals.low_gb || 0) - (nL - o.low_gb.length));
+        o.totals.expired = Math.max(0, (o.totals.expired || 0) - (nX - o.expired.length));
+      }
+    });
     if (OV_STATS) {
-      OV_STATS.expiring_3d = Math.max(0, (OV_STATS.expiring_3d || 0) - (n3 - EXP3.length));
-      OV_STATS.low_gb = Math.max(0, (OV_STATS.low_gb || 0) - (nL - LOWGB.length));
-      OV_STATS.expired = Math.max(0, (OV_STATS.expired || 0) - (nX - EXPIRED.length));
+      OV_STATS.expiring_3d = Math.max(0, (OV_STATS.expiring_3d || 0) - d3);
+      OV_STATS.low_gb = Math.max(0, (OV_STATS.low_gb || 0) - dL);
+      OV_STATS.expired = Math.max(0, (OV_STATS.expired || 0) - dX);
       const setStat = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
       setStat('stat-expiring3', OV_STATS.expiring_3d);
       setStat('stat-expired', OV_STATS.expired);
     }
     EXP_COUNTS = {};
-    EXP3.forEach(c => EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1);
-    renderKeySections();
+    Object.values(OV_BY_OWNER).forEach(o => {
+      (o.expiring || []).forEach(c => { EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1; });
+    });
     renderServers();
   }
 }
@@ -1386,7 +1478,7 @@ function initDashboardSmart() {
   if (snap && snap.populated) {
     const main = document.querySelector('main');
     if (main) {
-      lastServersHtml = null; lastSectionHtml.exp3 = null; lastSectionHtml.lowgb = null; lastSectionHtml.expired = null;
+      lastServersHtml = null;
       main.innerHTML = snap.html;
       const q = document.getElementById('q');
       if (q && snap.q) q.value = snap.q;
@@ -1396,13 +1488,24 @@ function initDashboardSmart() {
       // — a snapshot saved by older code shows expanded groups, while the
       // restored EXPANDED set says collapsed; without this the old view
       // flashed for a second until the quiet refresh re-rendered it.
+      // v6.1.1: IS_ADMIN is already correct here — it comes from the
+      // page's data-role at script load, not from a fetch — so the
+      // restored render keeps the owner grouping after a fresh login.
       renderServers();
-      renderKeySections();
     }
     initDashboardQuiet();
   } else {
     initDashboard();
   }
+}
+/* v6.1.1: one helper owns the nav ring — the active tab is the one
+   with the white ring. swapMain sets it from the URL; navTab sets it
+   for Search too (Search is the same page as Servers, so the URL
+   alone can never make it "active"). */
+function setActiveTab(tab) {
+  document.querySelectorAll('nav.bottom a[data-tab]').forEach(a => {
+    a.classList.toggle('on', a.dataset.tab === tab);
+  });
 }
 function swapMain(url, data, push) {
   const main = document.querySelector('main');
@@ -1410,7 +1513,7 @@ function swapMain(url, data, push) {
   // v4: the renderers skip DOM writes when the HTML is unchanged — but a
   // tab swap replaces the DOM with the template's spinner HTML, so the
   // "unchanged" cache is stale here and must be reset.
-  lastServersHtml = null; lastSectionHtml.exp3 = null; lastSectionHtml.lowgb = null; lastSectionHtml.expired = null;
+  lastServersHtml = null;
   main.innerHTML = data.html;
   if (data.populated) { // restore what the user had typed before the switch
     const q = document.getElementById('q');
@@ -1426,9 +1529,7 @@ function swapMain(url, data, push) {
   }
   document.title = data.title;
   const tab = url === '/settings' ? 'settings' : 'servers';
-  document.querySelectorAll('nav.bottom a[data-tab]').forEach(a => {
-    a.classList.toggle('on', a.dataset.tab === tab);
-  });
+  setActiveTab(tab);
   if (push) history.pushState({tab: url}, '', url);
   if (url === '/settings') initSettings();
   else if (data.populated) initDashboardQuiet();
@@ -1454,6 +1555,7 @@ function navTab(link, ev) {
   if (href.indexOf('#search') !== -1) {
     // Search tab: focus the dashboard search box (load the dashboard
     // first if we are on another tab).
+    setActiveTab('search');
     const q = document.getElementById('q');
     if (q) {
       q.focus();
@@ -1461,6 +1563,9 @@ function navTab(link, ev) {
       history.replaceState(null, '', '/dashboard#search');
     } else {
       goTab('/dashboard').then(() => {
+        // swapMain rings Servers from the URL — re-ring Search, since
+        // the user tapped the Search tab.
+        setActiveTab('search');
         const q2 = document.getElementById('q');
         if (q2) { q2.focus(); q2.scrollIntoView({behavior: 'smooth'}); }
       });
@@ -1469,6 +1574,7 @@ function navTab(link, ev) {
   }
   const path = href.split('#')[0] || '/dashboard';
   if (location.pathname === path || (path === '/dashboard' && location.pathname === '/')) {
+    setActiveTab('servers');
     window.scrollTo({top: 0, behavior: 'smooth'});
     return false;
   }
