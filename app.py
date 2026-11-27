@@ -316,6 +316,9 @@ def list_servers():
 # health cache: server_id -> (checked_at, online, clients, used_bytes, error)
 HEALTH_CACHE = {}
 HEALTH_TTL = 60
+# expiring scan cache: [checked_at, results] — the scan hits all 12 panels,
+# so a 60s cache keeps the dashboard + auto-refresh from re-scanning.
+EXPIRING_CACHE = [0, []]
 # last successful check per server (for "last seen" on down servers)
 LAST_SEEN = {}
 
@@ -744,24 +747,40 @@ def api_search():
 @login_required
 def api_expiring():
     days = int(request.args.get("days") or 7)
-    soon = time.time() + days * 86400
     now = time.time()
-    results = []
-    for s in list_servers():
-        full = get_server(s["id"])
+    if EXPIRING_CACHE[0] and now - EXPIRING_CACHE[0] < 60:
+        return jsonify({"ok": True, "results": EXPIRING_CACHE[1][:100]})
+    soon = now + days * 86400
+    # v4.2: scan the 12 servers in PARALLEL (was one by one: 12 x 2-4s =
+    # 30-60s per call, blocking a gunicorn worker the whole time). DB reads
+    # (server rows + created maps) happen here first — get_db needs the
+    # request context, so only the network scans run in the pool.
+    servers = [get_server(s["id"]) for s in list_servers()]
+    created_maps = {s["id"]: created_map(s["id"]) for s in servers}
+
+    def scan(full):
         try:
             clients = server_clients(full)
         except Exception:  # noqa: BLE001
-            continue
-        created = created_map(s["id"])
+            return []
+        created = created_maps[full["id"]]
+        out = []
         for c in clients:
             exp = c.get("expiry") or 0
             if exp and now <= exp <= soon:
-                pc = public_client(s["id"], c, created.get(c["name"]))
-                pc["server_name"] = s["name"]
+                pc = public_client(full["id"], c, created.get(c["name"]))
+                pc["server_name"] = full["name"]
                 pc["days_left"] = max(0, int((exp - now) // 86400))
-                results.append(pc)
+                out.append(pc)
+        return out
+
+    results = []
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for part in pool.map(scan, servers):
+            results.extend(part)
     results.sort(key=lambda r: r["expiry"])
+    EXPIRING_CACHE[0] = now
+    EXPIRING_CACHE[1] = results
     return jsonify({"ok": True, "results": results[:100]})
 
 
