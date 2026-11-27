@@ -35,6 +35,9 @@ fi
 cd /opt/khp-panel
 python3 -m venv .venv
 .venv/bin/pip install -q -r requirements.txt
+# The service runs as www-data, so it must own the app dir (it writes the
+# SQLite DB + secret.key there at runtime).
+chown -R www-data:www-data /opt/khp-panel
 
 # Systemd service (runs gunicorn on 127.0.0.1:5000)
 cp khp-panel.service /etc/systemd/system/khp-panel.service
