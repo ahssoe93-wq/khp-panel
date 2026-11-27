@@ -25,7 +25,7 @@ apt-get install -y -qq python3 python3-venv python3-pip git curl debian-keyring 
 PYV="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 apt-get install -y -qq "python${PYV}-venv" > /dev/null || echo "NOTE: python${PYV}-venv not found in apt; venv creation may fail" >&2
 # Caddy (official repo) for automatic HTTPS
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --yes --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null
 apt-get update -qq
 apt-get install -y -qq caddy > /dev/null
