@@ -33,31 +33,82 @@ function esc(s) {
 
 /* ---------------- dashboard ---------------- */
 let SERVERS = [], HEALTH = {};
-async function loadDashboard() {
+let EXPIRING = [], EXPIRING_ALL = false, EXP_COUNTS = {};
+let COLLAPSED = new Set();
+let CHECKED_AT = 0;
+const FLAG_EMOJI = {singapore: '🇸🇬', thailand: '🇹🇭', japan: '🇯🇵'};
+const COUNTRY_ORDER = ['Singapore', 'Japan', 'Thailand'];
+function flagFor(country) {
+  const c = (country || '').toLowerCase();
+  return FLAG_EMOJI[c] || (country || '??').slice(0, 2).toUpperCase();
+}
+function fmtGB(n) {
+  if (!n) return '0 GB';
+  return Math.round(n / 1073741824).toLocaleString('en-US') + ' GB';
+}
+function fmtTime(ts) {
+  if (!ts) return 'never';
+  return new Date(ts * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
+}
+async function loadDashboard(force) {
   try {
     const j = await api('/api/servers');
     SERVERS = j.servers;
     renderServers();
-    const h = await api('/api/health');
+    const h = await api('/api/health' + (force ? '?force=1' : ''));
     HEALTH = {};
     h.health.forEach(x => HEALTH[x.id] = x);
+    CHECKED_AT = h.checked_at || 0;
     renderServers();
-    document.getElementById('stat-servers').textContent =
-      h.health.filter(x => x.online).length + ' / ' + h.health.length;
+    renderDownBanner(h.health);
+    const online = h.health.filter(x => x.online).length;
+    const statEl = document.getElementById('stat-servers');
+    statEl.textContent = online + ' / ' + h.health.length;
+    statEl.parentElement.classList.toggle('down', online < h.health.length);
     document.getElementById('stat-keys').textContent =
-      h.health.reduce((a, x) => a + (x.clients || 0), 0);
+      h.health.reduce((a, x) => a + (x.clients || 0), 0).toLocaleString('en-US');
+    document.getElementById('last-checked').textContent =
+      'Last checked ' + fmtTime(CHECKED_AT) + ' • auto-refresh every 60s';
   } catch (e) {
     document.getElementById('server-list').innerHTML =
       '<div class="error">Could not load servers: ' + esc(e.message) + '</div>';
   }
   try {
     const j = await api('/api/expiring?days=7');
+    EXPIRING = j.results;
+    EXPIRING_ALL = false;
+    EXP_COUNTS = {};
+    j.results.forEach(c => EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1);
     document.getElementById('stat-expiring').textContent = j.results.length;
-    renderExpiring(j.results);
+    renderExpiring();
+    renderServers(); // expiring counts feed the server cards
   } catch (e) {
     document.getElementById('expiring').innerHTML =
       '<div class="error">Could not load expiring keys.</div>';
   }
+}
+function renderDownBanner(health) {
+  const el = document.getElementById('down-banner');
+  const down = health.filter(x => !x.online);
+  if (!down.length) { el.innerHTML = ''; return; }
+  el.innerHTML = down.map(x => {
+    const seen = x.last_seen ? 'last seen ' + fmtTime(x.last_seen) : 'never seen';
+    return '<div class="alert-banner"><div class="warn">!</div>' +
+      '<div class="grow"><b>' + esc(x.name) + ' is down</b>' +
+      '<div class="sub">' + seen + ' • keys on it still work if already connected</div></div>' +
+      '<button class="retry" onclick="retryServer(' + x.id + ', this)">Retry</button></div>';
+  }).join('');
+}
+async function retryServer(id, btn) {
+  btn.disabled = true; btn.textContent = '…';
+  try {
+    await api('/api/server/' + id + '/test', {method: 'POST'});
+    toast('Server is back online');
+  } catch (e) {
+    toast('Still down: ' + e.message);
+  }
+  btn.disabled = false; btn.textContent = 'Retry';
+  loadDashboard(true);
 }
 function renderServers() {
   const el = document.getElementById('server-list');
@@ -65,33 +116,85 @@ function renderServers() {
   const list = SERVERS.filter(s => s.name.toLowerCase().includes(f) ||
     (s.country || '').toLowerCase().includes(f));
   if (!list.length) { el.innerHTML = '<div class="empty">No servers yet — add one in Settings.</div>'; return; }
-  el.innerHTML = list.map(s => {
-    const h = HEALTH[s.id];
-    const dot = h ? (h.online ? 'on' : 'off') : '';
-    const sub = h
-      ? (h.online ? (s.country + ' • ' + h.clients + ' clients') : ('Offline — ' + esc(h.error || 'unreachable')))
-      : (s.country + ' • checking…');
-    const CC = {singapore: 'SG', thailand: 'TH', japan: 'JP'};
-    const flag = CC[(s.country || '').toLowerCase()] || (s.country || '??').slice(0, 2).toUpperCase();
-    return '<div class="server" onclick="location.href=\'/server/' + s.id + '\'">' +
-      '<div class="flag">' + esc(flag) + '</div>' +
-      '<div class="grow"><b style="font-size:18px">' + esc(s.name) +
-      (s.is_free ? '<span class="badge-free">FREE</span>' : '') + '</b>' +
-      '<div class="muted small">' + esc(sub) + '</div></div>' +
-      '<span class="dot ' + dot + '"></span></div>';
+  // group by country: Singapore / Japan / Thailand first, then the rest
+  const groups = {};
+  list.forEach(s => {
+    const g = s.country || 'Other';
+    (groups[g] = groups[g] || []).push(s);
+  });
+  const order = Object.keys(groups).sort((a, b) => {
+    const ia = COUNTRY_ORDER.indexOf(a), ib = COUNTRY_ORDER.indexOf(b);
+    if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    return a.localeCompare(b);
+  });
+  el.innerHTML = order.map(g => {
+    const items = groups[g];
+    const collapsed = COLLAPSED.has(g);
+    const chev = collapsed ? '▼' : '▲';
+    let html = '<div class="group-h" onclick="toggleGroup(\'' + esc(g) + '\')">' +
+      '<span class="gflag">' + flagFor(g === 'Other' ? '' : g) + '</span>' +
+      '<b>' + esc(g) + '</b><span class="muted small">• ' + items.length + ' server' +
+      (items.length === 1 ? '' : 's') + '</span>' +
+      '<span class="chev">' + chev + '</span></div>';
+    if (collapsed) return html;
+    html += items.map(s => {
+      const h = HEALTH[s.id];
+      const online = h ? h.online : null;
+      const dot = online === null ? '' : (online ? 'on' : 'off');
+      const expN = EXP_COUNTS[s.id] || 0;
+      const expHtml = expN ? ' <span class="exp-count">• ' + expN + ' expiring</span>' : '';
+      const badges = (s.is_free ? '<span class="badge-free">FREE</span>' : '') +
+        (s.is_sales ? '<span class="badge-sales">SALES</span>' : '');
+      const sub = online === null
+        ? (s.country + ' • checking…')
+        : online
+          ? (s.type === 'xui' ? '3X-UI' : 'Marzban') + ' • ' + h.clients + ' clients' + expHtml
+          : ('Offline — ' + esc(h.error || 'unreachable'));
+      if (online === false) {
+        const seen = h.last_seen ? 'last seen ' + fmtTime(h.last_seen) : 'never seen';
+        return '<div class="server down">' +
+          '<div class="flag flag-emoji">' + flagFor(s.country) + '</div>' +
+          '<div class="grow"><b style="font-size:18px">' + esc(s.name) +
+          '<span class="badge-down">DOWN</span></b>' +
+          '<div class="muted small">' + (s.type === 'xui' ? '3X-UI' : 'Marzban') + ' • ' + h.clients + ' clients</div></div>' +
+          '<div class="used"><span class="dot off"></span><div class="muted small" style="color:var(--red)">' + seen + '</div></div>' +
+          '<button class="keybtn" style="background:transparent;color:var(--red);border:1px solid var(--red)" onclick="event.stopPropagation();retryServer(' + s.id + ', this)">Retry</button></div>';
+      }
+      return '<div class="server" onclick="location.href=\'/server/' + s.id + '\'">' +
+        '<div class="flag flag-emoji">' + flagFor(s.country) + '</div>' +
+        '<div class="grow"><b style="font-size:18px">' + esc(s.name) + badges + '</b>' +
+        '<div class="muted small">' + sub + '</div></div>' +
+        '<div class="used"><span class="dot ' + dot + '"></span>' +
+        (h && h.online ? '<div class="muted small">' + fmtGB(h.used) + '</div>' : '') + '</div>' +
+        '<button class="keybtn" onclick="event.stopPropagation();location.href=\'/server/' + s.id + '#add\'">+ Key</button></div>';
+    }).join('');
+    return html;
   }).join('');
 }
+function toggleGroup(g) {
+  if (COLLAPSED.has(g)) COLLAPSED.delete(g); else COLLAPSED.add(g);
+  renderServers();
+}
 function filterServers() { renderServers(); }
-function renderExpiring(results) {
+function renderExpiring() {
   const el = document.getElementById('expiring');
-  if (!results.length) { el.innerHTML = '<div class="empty">Nothing expiring in the next 7 days.</div>'; return; }
-  el.innerHTML = results.map(c =>
+  if (!EXPIRING.length) { el.innerHTML = '<div class="empty">Nothing expiring in the next 7 days.</div>'; return; }
+  const shown = EXPIRING_ALL ? EXPIRING : EXPIRING.slice(0, 5);
+  el.innerHTML = shown.map(c =>
     '<div class="card client"><div class="row"><div class="grow">' +
     '<div class="name">' + esc(c.name) + '</div>' +
     '<div class="muted small">' + esc(c.server_name) + ' • expires ' + esc(c.expiry_h) +
     ' • ' + c.days_left + ' day' + (c.days_left === 1 ? '' : 's') + ' left</div></div>' +
-    '<span class="status ' + c.status + '">' + c.status + '</span></div></div>'
-  ).join('');
+    '<span class="status ' + c.status + '">' + c.status + '</span></div>' +
+    '<div class="actions">' +
+    '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\')">Renew</button>' +
+    '<button class="btn ghost sm" onclick="swapKey(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this)">Swap</button>' +
+    '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this)">Copy link</button>' +
+    '</div></div>'
+  ).join('') + (!EXPIRING_ALL && EXPIRING.length > 5
+    ? '<button class="see-all" onclick="EXPIRING_ALL=true;renderExpiring()">See all ' + EXPIRING.length + ' →</button>'
+    : (EXPIRING_ALL && EXPIRING.length > 5
+      ? '<button class="see-all" onclick="EXPIRING_ALL=false;renderExpiring()">Show less ↑</button>' : ''));
 }
 async function globalSearch() {
   const q = document.getElementById('q').value.trim();
@@ -114,6 +217,14 @@ async function globalSearch() {
 }
 
 /* ---------------- server page ---------------- */
+let SORT_BY = 'expiry', FILTER_BY = 'all';
+const PAGE_SIZE = 20;
+let SHOWN = PAGE_SIZE;
+const ARMED = {}; // two-click confirm state, keyed by action+name
+function refreshAfterAction() {
+  if (document.getElementById('client-list')) loadServerPage();
+  if (document.getElementById('server-list')) loadDashboard(true);
+}
 async function loadServerPage() {
   try {
     const h = await api('/api/health');
@@ -125,30 +236,63 @@ async function loadServerPage() {
   try {
     const j = await api('/api/server/' + SERVER_ID + '/clients');
     ALL_CLIENTS = j.clients;
+    document.getElementById('count-all').textContent = ALL_CLIENTS.length;
     renderClients();
   } catch (e) {
     document.getElementById('client-list').innerHTML =
       '<div class="error">Could not load keys: ' + esc(e.message) + '</div>';
   }
 }
+function filteredClients() {
+  const f = (document.getElementById('client-filter').value || '').toLowerCase();
+  const now = Date.now() / 1000;
+  let list = ALL_CLIENTS.filter(c => c.name.toLowerCase().includes(f));
+  if (FILTER_BY === 'expiring')
+    list = list.filter(c => c.expiry && c.expiry - now <= 7 * 86400);
+  if (FILTER_BY === 'high')
+    list = list.filter(c => c.pct >= 70);
+  if (SORT_BY === 'expiry')
+    list.sort((a, b) => (a.expiry || 1e15) - (b.expiry || 1e15));
+  else if (SORT_BY === 'usage')
+    list.sort((a, b) => (b.used || 0) - (a.used || 0));
+  else
+    list.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+  return list;
+}
+function isExpiringToday(c) {
+  const now = Date.now() / 1000;
+  return c.expiry && c.expiry - now <= 86400;
+}
 function renderClients() {
   const el = document.getElementById('client-list');
-  const f = (document.getElementById('client-filter').value || '').toLowerCase();
-  const list = ALL_CLIENTS.filter(c => c.name.toLowerCase().includes(f));
-  if (!list.length) { el.innerHTML = '<div class="empty">No keys found.</div>'; return; }
-  el.innerHTML = list.map(c =>
-    '<div class="card client">' +
-    '<div class="row"><div class="grow"><div class="name">' + esc(c.name) + '</div>' +
-    '<div class="muted small">' + esc(c.used_h) + ' / ' + esc(c.limit_h) + ' • exp ' + esc(c.expiry_h) + '</div>' +
-    '<div class="bar"><i style="width:' + c.pct + '%"></i></div></div>' +
-    '<span class="status ' + c.status + '">' + c.status + '</span></div>' +
-    '<div class="row" style="margin-top:12px">' +
-    '<button class="btn ghost" onclick="copyLink(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this)">Copy link</button>' +
-    '<button class="btn ghost" style="color:var(--red);border-color:rgba(239,68,68,.5)" onclick="deleteKey(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\')">Delete</button>' +
-    '</div></div>'
-  ).join('');
+  const list = filteredClients();
+  if (!list.length) { el.innerHTML = '<div class="empty">No keys found.</div>'; }
+  else {
+    el.innerHTML = list.slice(0, SHOWN).map(c => {
+      const n = esc(c.name).replace(/'/g, "\\'");
+      const toggleLabel = c.enable ? 'Disable' : 'Enable';
+      return '<div class="card client' + (isExpiringToday(c) ? ' expiring-today' : '') + '">' +
+      '<div class="row"><div class="grow"><div class="name">' + esc(c.name) + '</div>' +
+      '<div class="muted small">' + esc(c.used_h) + ' / ' + esc(c.limit_h) + ' • exp ' + esc(c.expiry_h) + '</div>' +
+      '<div class="bar"><i style="width:' + c.pct + '%"></i></div></div>' +
+      '<span class="status ' + c.status + '">' + c.status + '</span></div>' +
+      '<div class="actions">' +
+      '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + n + '\', this)">Copy link</button>' +
+      '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + n + '\')">Renew</button>' +
+      '<button class="btn ghost sm" onclick="swapKey(' + c.server_id + ', \'' + n + '\', this)">Swap</button>' +
+      '<button class="btn ghost sm" onclick="toggleKey(' + c.server_id + ', \'' + n + '\', ' + (!c.enable) + ', this)">' + toggleLabel + '</button>' +
+      '<button class="btn ghost sm" onclick="openGbModal(' + c.server_id + ', \'' + n + '\')">Edit GB</button>' +
+      '<button class="btn ghost sm red" onclick="deleteKey(' + c.server_id + ', \'' + n + '\', this)">Delete</button>' +
+      '</div></div>';
+    }).join('');
+  }
+  document.getElementById('page-info').textContent =
+    'Showing ' + Math.min(SHOWN, list.length) + ' of ' + list.length + ' keys';
+  document.getElementById('load-more').style.display =
+    (SHOWN < list.length) ? '' : 'none';
 }
-function filterClients() { renderClients(); }
+function loadMoreClients() { SHOWN += PAGE_SIZE; renderClients(); }
+function filterClients() { SHOWN = PAGE_SIZE; renderClients(); }
 async function copyLink(serverId, name, btn) {
   btn.disabled = true;
   try {
@@ -157,15 +301,130 @@ async function copyLink(serverId, name, btn) {
   } catch (e) { toast('Failed: ' + e.message); }
   btn.disabled = false;
 }
-async function deleteKey(serverId, name) {
-  if (!confirm('Delete key ' + name + '?\nThis cannot be undone. The customer loses access at once.')) return;
+// Two-click arm: first click arms the button ("Sure?"), second click (within
+// 4s) runs the destructive action. No window.confirm() — automated browsers
+// auto-dismiss those dialogs.
+function armOrRun(key, btn, armLabel, run) {
+  if (!ARMED[key]) {
+    ARMED[key] = true;
+    const orig = btn.textContent;
+    btn.textContent = armLabel;
+    setTimeout(() => {
+      ARMED[key] = false;
+      if (btn.isConnected) btn.textContent = orig;
+    }, 4000);
+    return;
+  }
+  ARMED[key] = false;
+  run();
+}
+async function deleteKey(serverId, name, btn) {
+  armOrRun('del:' + name, btn, 'Sure?', async () => {
+    try {
+      await api('/api/server/' + serverId + '/delete-key', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name})});
+      toast('Deleted ' + name);
+      refreshAfterAction();
+    } catch (e) { toast('Delete failed: ' + e.message); }
+  });
+}
+async function swapKey(serverId, name, btn) {
+  armOrRun('swap:' + name, btn, 'Swap?', async () => {
+    btn.disabled = true;
+    try {
+      const j = await api('/api/server/' + serverId + '/clients/' + encodeURIComponent(name) + '/swap',
+        {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
+      showActionResult(j.name, j.link, 'Swapped — new password, same name / expiry / GB');
+      toast('Swapped ' + name);
+      refreshAfterAction();
+    } catch (e) { toast('Swap failed: ' + e.message); }
+    btn.disabled = false;
+  });
+}
+async function toggleKey(serverId, name, enable, btn) {
+  btn.disabled = true;
   try {
-    await api('/api/server/' + serverId + '/delete-key', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name})});
-    toast('Deleted ' + name);
-    loadServerPage();
-  } catch (e) { toast('Delete failed: ' + e.message); }
+    const j = await api('/api/server/' + serverId + '/clients/' + encodeURIComponent(name) + '/toggle',
+      {method: 'POST', headers: {'Content-Type': 'application/json'},
+       body: JSON.stringify({enable})});
+    toast((j.enable ? 'Enabled ' : 'Disabled ') + name);
+    refreshAfterAction();
+  } catch (e) { toast('Failed: ' + e.message); }
+  btn.disabled = false;
+}
+/* ---- shared Renew / Edit-GB modal (base.html #action-modal) ---- */
+function openActionModal(title, bodyHtml) {
+  document.getElementById('action-title').textContent = title;
+  document.getElementById('action-body').innerHTML = bodyHtml;
+  document.getElementById('action-body').style.display = '';
+  document.getElementById('action-result').style.display = 'none';
+  document.getElementById('action-modal').classList.add('open');
+}
+function closeActionModal() {
+  document.getElementById('action-modal').classList.remove('open');
+}
+function showActionResult(name, link, note) {
+  document.getElementById('action-result-name').textContent =
+    name + (note ? '  •  ' + note : '');
+  const lb = document.getElementById('action-result-link');
+  const cb = document.getElementById('action-copy-btn');
+  if (link) {
+    lb.textContent = link; lb.style.display = '';
+    cb.style.display = '';
+  } else {
+    lb.style.display = 'none'; cb.style.display = 'none';
+  }
+  document.getElementById('action-body').style.display = 'none';
+  document.getElementById('action-result').style.display = '';
+}
+function openRenewModal(serverId, name) {
+  openActionModal('Renew key — ' + name,
+    '<p class="muted">New expiry = old expiry + 30 / 60 / 90 days. ' +
+    'The key is renamed to the new date. GB stays the same.</p>' +
+    '<div style="height:12px"></div>' +
+    '<div class="seg">' +
+    '<button type="button" onclick="submitRenew(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', 1, this)">+1 mo</button>' +
+    '<button type="button" onclick="submitRenew(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', 2, this)">+2 mo</button>' +
+    '<button type="button" onclick="submitRenew(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', 3, this)">+3 mo</button>' +
+    '</div><div style="height:10px"></div>' +
+    '<button class="btn ghost block" onclick="closeActionModal()">Cancel</button>');
+}
+async function submitRenew(serverId, name, months, btn) {
+  btn.disabled = true;
+  try {
+    const j = await api('/api/server/' + serverId + '/clients/' + encodeURIComponent(name) + '/renew',
+      {method: 'POST', headers: {'Content-Type': 'application/json'},
+       body: JSON.stringify({months})});
+    showActionResult(j.name, j.link,
+      'renewed +' + months + ' mo • ' + j.gb + ' GB • exp ' + j.expiry_h);
+    toast('Renewed → ' + j.name);
+    refreshAfterAction();
+  } catch (e) { toast('Renew failed: ' + e.message); }
+  btn.disabled = false;
+}
+function openGbModal(serverId, name) {
+  openActionModal('Edit GB — ' + name,
+    '<p class="muted">Change the key\u2019s GB limit. Used traffic is kept.</p>' +
+    '<div style="height:12px"></div>' +
+    '<div class="seg">' +
+    [400, 500, 1000, 1500].map(gb =>
+      '<button type="button" onclick="submitGb(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', ' + gb + ', this)">' + gb + ' GB</button>'
+    ).join('') +
+    '</div><div style="height:10px"></div>' +
+    '<button class="btn ghost block" onclick="closeActionModal()">Cancel</button>');
+}
+async function submitGb(serverId, name, gb, btn) {
+  btn.disabled = true;
+  try {
+    await api('/api/server/' + serverId + '/clients/' + encodeURIComponent(name) + '/gb',
+      {method: 'POST', headers: {'Content-Type': 'application/json'},
+       body: JSON.stringify({gb})});
+    toast(name + ' → ' + gb + ' GB');
+    closeActionModal();
+    refreshAfterAction();
+  } catch (e) { toast('Failed: ' + e.message); }
+  btn.disabled = false;
 }
 function openAddKey() {
   document.getElementById('add-form').style.display = '';
