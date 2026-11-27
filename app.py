@@ -263,6 +263,8 @@ def list_servers():
 # health cache: server_id -> (checked_at, online, clients, used_bytes, error)
 HEALTH_CACHE = {}
 HEALTH_TTL = 60
+# last successful check per server (for "last seen" on down servers)
+LAST_SEEN = {}
 
 
 def server_health(server, force=False):
@@ -273,10 +275,12 @@ def server_health(server, force=False):
     try:
         client = make_client(server)
         online, count, used = client.health()
+        LAST_SEEN[server["id"]] = now
         result = {"online": True, "clients": count, "used": used, "error": ""}
     except Exception as exc:  # noqa: BLE001 - surfaced to the UI
         result = {"online": False, "clients": 0, "used": 0,
                   "error": str(exc)[:200]}
+    result["last_seen"] = LAST_SEEN.get(server["id"], 0)
     HEALTH_CACHE[server["id"]] = (now, result)
     return result
 
@@ -323,7 +327,8 @@ def api_health():
         full = get_server(s["id"])
         h = server_health(full, force=force)
         out.append({"id": s["id"], "name": s["name"], **h})
-    return jsonify({"ok": True, "health": out})
+    return jsonify({"ok": True, "health": out,
+                    "checked_at": int(time.time())})
 
 
 @app.route("/api/server/<int:server_id>/clients")
@@ -423,6 +428,124 @@ def api_delete_key(server_id):
         return jsonify({"ok": False, "error": str(exc)[:300]}), 502
     HEALTH_CACHE.pop(server_id, None)
     return jsonify({"ok": True, "name": name, "gone": True})
+
+
+# ---------------------------------------------------------------- key actions (v2)
+def _key_action_server(server_id):
+    server = get_server(server_id)
+    if not server:
+        return None, (jsonify({"ok": False, "error": "server not found"}), 404)
+    return server, None
+
+
+@app.route("/api/server/<int:server_id>/clients/<path:name>/renew",
+           methods=["POST"])
+@login_required
+def api_renew_key(server_id, name):
+    """Renew +1/+2/+3 months: new expiry = old expiry + 30/60/90 days.
+    The key is RENAMED to the new date (the name encodes the expiry) and
+    the expiry moves in the same update call. GB is unchanged."""
+    server, err = _key_action_server(server_id)
+    if err:
+        return err
+    data = request.get_json(force=True, silent=True) or {}
+    months = int(data.get("months") or 1)
+    if months not in (1, 2, 3):
+        return jsonify({"ok": False, "error": "months must be 1, 2 or 3"}), 400
+    try:
+        client = make_client(server)
+        if server["type"] == "xui":
+            rec, new_name = client.renew_client(name, months)
+        else:
+            rec, new_name = client.renew_user(name, months)
+        link = client.build_link(rec)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 502
+    HEALTH_CACHE.pop(server_id, None)
+    return jsonify({"ok": True, "old_name": name, "name": new_name,
+                    "link": link,
+                    "expiry": rec.get("expiry") or 0,
+                    "expiry_h": (datetime.fromtimestamp(rec["expiry"], MM)
+                                 .strftime("%d %b %Y") if rec.get("expiry")
+                                 else "never"),
+                    "gb": int((rec.get("limit") or 0) // 1073741824),
+                    "months": months})
+
+
+@app.route("/api/server/<int:server_id>/clients/<path:name>/swap",
+           methods=["POST"])
+@login_required
+def api_swap_key(server_id, name):
+    """Swap: DELETE the old client first, then create a fresh one with the
+    SAME name / expiry / GB but a fresh password. Used when a key does not
+    connect."""
+    server, err = _key_action_server(server_id)
+    if err:
+        return err
+    try:
+        client = make_client(server)
+        if server["type"] == "xui":
+            rec = client.swap_client(name)
+        else:
+            rec = client.swap_user(name)
+        link = client.build_link(rec)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 502
+    HEALTH_CACHE.pop(server_id, None)
+    return jsonify({"ok": True, "name": name, "link": link,
+                    "expiry": rec.get("expiry") or 0})
+
+
+@app.route("/api/server/<int:server_id>/clients/<path:name>/toggle",
+           methods=["POST"])
+@login_required
+def api_toggle_key(server_id, name):
+    """Disable / enable a key. Body: {"enable": true/false}."""
+    server, err = _key_action_server(server_id)
+    if err:
+        return err
+    data = request.get_json(force=True, silent=True) or {}
+    enable = bool(data.get("enable"))
+    try:
+        client = make_client(server)
+        if server["type"] == "xui":
+            rec = client.toggle_client(name, enable)
+        else:
+            rec = client.toggle_user(name, enable)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 502
+    HEALTH_CACHE.pop(server_id, None)
+    return jsonify({"ok": True, "name": name, "enable": rec.get("enable"),
+                    "status": rec.get("status")})
+
+
+@app.route("/api/server/<int:server_id>/clients/<path:name>/gb",
+           methods=["POST"])
+@login_required
+def api_gb_key(server_id, name):
+    """Change a key's GB limit. Body: {"gb": 400|500|1000|1500}."""
+    server, err = _key_action_server(server_id)
+    if err:
+        return err
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        gb = int(data.get("gb") or 0)
+    except (TypeError, ValueError):
+        gb = 0
+    if gb not in GB_BYTES:
+        return jsonify({"ok": False,
+                        "error": "gb must be one of 400, 500, 1000, 1500"}), 400
+    try:
+        client = make_client(server)
+        if server["type"] == "xui":
+            rec = client.set_gb_client(name, GB_BYTES[gb])
+        else:
+            rec = client.set_gb_user(name, GB_BYTES[gb])
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 502
+    HEALTH_CACHE.pop(server_id, None)
+    return jsonify({"ok": True, "name": name, "gb": gb,
+                    "limit": rec.get("limit")})
 
 
 @app.route("/api/search")
