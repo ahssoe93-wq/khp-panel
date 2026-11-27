@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% set nav='settings' %}
+{% block title %}Settings — KHP Panel{% endblock %}
+{% block content %}
+<h2 class="sec">Servers</h2>
+<div id="settings-list"><div class="spin">Loading…</div></div>
+
+<h2 class="sec">Add a server</h2>
+<div class="card">
+  <div id="form-error"></div>
+  <label>Display name *</label>
+  <input id="f-name" placeholder="e.g. PRE8S">
+  <label>Country</label>
+  <input id="f-country" placeholder="e.g. Singapore">
+  <label>Type *</label>
+  <select id="f-type">
+    <option value="xui">3X-UI</option>
+    <option value="marzban">Marzban</option>
+  </select>
+  <label>Panel base URL *</label>
+  <input id="f-base" placeholder="https://…:2053  or  http://th-xi.giize.com:8001">
+  <label>Panel path (3X-UI only)</label>
+  <input id="f-path" placeholder="/Oir7bFnl67vdhMuIgz/">
+  <label>Admin username</label>
+  <input id="f-user" value="kohein">
+  <label>Admin password *</label>
+  <input id="f-pw" type="password" placeholder="Panel admin password" autocomplete="new-password">
+  <label>Share host (for key links) *</label>
+  <input id="f-host" placeholder="sg-….premiumx.giize.com">
+  <label>Share port *</label>
+  <input id="f-port" type="number" value="1080">
+  <div class="row" style="margin-top:14px">
+    <label style="margin:0"><input type="checkbox" id="f-free" style="width:auto"> FREE server</label>
+    <label style="margin:0"><input type="checkbox" id="f-sales" style="width:auto"> Sales server</label>
+  </div>
+  <div style="height:16px"></div>
+  <button class="btn block" onclick="addServer()">Save server</button>
+  <p class="muted small" style="margin-top:10px">Passwords are stored encrypted on this panel only.
+  Use "Test connection" on a server to check the login works.</p>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>loadSettings();</script>
+{% endblock %}
