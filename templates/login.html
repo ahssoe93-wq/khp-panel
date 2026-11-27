@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Login — KHP Panel{% endblock %}
+{% block content %}
+<div class="center">
+  <div class="card">
+    <h2>Login</h2>
+    <p class="muted">Enter your KHP Panel admin password.</p>
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <form method="post">
+      <label>Admin password</label>
+      <input type="password" name="password" required autocomplete="current-password" autofocus>
+      <div style="height:16px"></div>
+      <button class="btn block" type="submit">Login</button>
+    </form>
+  </div>
+</div>
+{% endblock %}
