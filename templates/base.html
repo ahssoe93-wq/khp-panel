@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}KHP Panel{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header>
+  <div class="logo">K</div>
+  <div>
+    <h1>KHP PANEL</h1>
+    <div class="sub">Own VPN Panel</div>
+  </div>
+  <div class="spacer"></div>
+  {% if session.get('logged_in') %}
+  <a class="chip" href="{{ url_for('logout') }}">Logout</a>
+  {% endif %}
+</header>
+<main>
+  {% block content %}{% endblock %}
+</main>
+{% if session.get('logged_in') %}
+<nav class="bottom">
+  <a href="{{ url_for('dashboard') }}" class="{{ 'on' if nav=='servers' else '' }}">Servers</a>
+  <a href="{{ url_for('dashboard') }}#search" class="{{ 'on' if nav=='search' else '' }}">Search</a>
+  <a href="{{ url_for('settings') }}" class="{{ 'on' if nav=='settings' else '' }}">Settings</a>
+</nav>
+{% endif %}
+<div id="toast"></div>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
