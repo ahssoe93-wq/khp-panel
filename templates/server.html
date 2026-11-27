@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% set nav='servers' %}
+{% block title %}{{ server.name }} — KHP Panel{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('dashboard') }}">← All servers</a></p>
+<div class="card">
+  <div class="row">
+    <div class="flag">{{ {'Singapore': 'SG', 'Thailand': 'TH', 'Japan': 'JP'}.get(server.country, (server.country[:2].upper() if server.country else '??')) }}</div>
+    <div class="grow">
+      <h2>{{ server.name }}{% if server.is_free %}<span class="badge-free">FREE</span>{% endif %}</h2>
+      <div class="muted small">{{ server.country }} • {{ '3X-UI' if server.type=='xui' else 'Marzban' }} • <span id="srv-status">checking…</span></div>
+    </div>
+    <span class="dot" id="srv-dot"></span>
+  </div>
+</div>
+
+<button class="btn block" id="add-key-btn" onclick="openAddKey()">+ Add Key</button>
+<div style="height:16px"></div>
+
+<div class="searchbox">
+  <input id="client-filter" type="search" placeholder="Search keys on this server…" autocomplete="off">
+</div>
+<div id="client-list"><div class="spin">Loading keys…</div></div>
+
+<div class="modal-back" id="add-modal">
+  <div class="modal">
+    <h3>Add key — {{ server.name }}</h3>
+    <div id="add-form">
+      <label>Customer name</label>
+      <input id="add-name" placeholder="e.g. MgBhone" autocomplete="off">
+      <p class="muted small">The key name is made automatically: Name__D_M_YYYY (expiry date).</p>
+      <label>Months</label>
+      <div class="seg" id="add-months">
+        <button type="button" data-m="1" class="sel">1 mo • 400 GB</button>
+        <button type="button" data-m="2">2 mo • 1000 GB</button>
+        <button type="button" data-m="3">3 mo • 1500 GB</button>
+      </div>
+      <div style="height:16px"></div>
+      <button class="btn block" id="add-submit" onclick="submitAddKey()">Create key</button>
+      <div style="height:10px"></div>
+      <button class="btn ghost block" onclick="closeAddKey()">Cancel</button>
+    </div>
+    <div id="add-result" style="display:none">
+      <p class="muted">Key created: <b id="add-result-name" style="color:var(--text)"></b></p>
+      <div class="linkbox" id="add-result-link"></div>
+      <button class="btn block" onclick="copyText(document.getElementById('add-result-link').textContent, 'Link copied')">Copy link</button>
+      <div style="height:10px"></div>
+      <button class="btn ghost block" onclick="closeAddKey()">Done</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const SERVER_ID = {{ server.id }};
+let ALL_CLIENTS = [];
+loadServerPage();
+document.getElementById('client-filter').addEventListener('input', filterClients);
+document.querySelectorAll('#add-months button').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('#add-months button').forEach(x => x.classList.remove('sel'));
+  b.classList.add('sel');
+}));
+</script>
+{% endblock %}
