@@ -23,32 +23,12 @@
 </div>
 <div id="server-list"><div class="spin">Loading servers…</div></div>
 
-<!-- v6.1: three key sections — EXPIRING IN 3 DAYS (yellow), LOW GB
-     (orange), EXPIRED KEYS (red). All three start collapsed; tap the
-     bar to show the list. -->
-<div class="sec-head" id="exp3-head" onclick="toggleKeySection('exp3')">
-  <h2 class="sec sec-exp3">Expiring in 3 days</h2>
-  <span class="muted small" id="exp3-hint">tap to show</span>
-  <span class="badge-exp" id="exp3-count"></span>
-  <span class="chev" id="exp3-chev">▼</span>
-</div>
-<div id="exp3-list" style="display:none"></div>
+{# v6.1.1: the three key sections (EXPIRING IN 3 DAYS / LOW GB /
+   EXPIRED KEYS) no longer live at the dashboard bottom. They are
+   rendered by app.js INSIDE each owner group — below the SG/JP/TH
+   country groups in MY SERVERS, and below the SERVERS heading's
+   country groups in each channel — scoped to that owner's servers. #}
 
-<div class="sec-head" id="lowgb-head" onclick="toggleKeySection('lowgb')">
-  <h2 class="sec sec-lowgb">Low GB — under 10 GB left</h2>
-  <span class="muted small" id="lowgb-hint">tap to show</span>
-  <span class="badge-lowgb" id="lowgb-count"></span>
-  <span class="chev" id="lowgb-chev">▼</span>
-</div>
-<div id="lowgb-list" style="display:none"></div>
-
-<div class="sec-head" id="expired-head" onclick="toggleKeySection('expired')">
-  <h2 class="sec sec-expired">Expired keys</h2>
-  <span class="muted small" id="expired-hint">tap to show</span>
-  <span class="badge-expired" id="expired-count"></span>
-  <span class="chev" id="expired-chev">▼</span>
-</div>
-<div id="expired-list" style="display:none"></div>
 {% endblock %}
 {% block scripts %}
 <script>
