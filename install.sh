@@ -19,6 +19,11 @@ if [ "$(id -u)" -ne 0 ]; then echo "Run as root." >&2; exit 1; fi
 
 apt-get update -qq
 apt-get install -y -qq python3 python3-venv python3-pip git curl debian-keyring debian-archive-keyring apt-transport-https > /dev/null
+# The venv needs the ensurepip module for the EXACT python3 version on this
+# box (Ubuntu 20.04 default is 3.8, but this server's python3 is 3.9 — the
+# plain python3-venv package installs the 3.8 one and the venv build fails).
+PYV="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+apt-get install -y -qq "python${PYV}-venv" > /dev/null || echo "NOTE: python${PYV}-venv not found in apt; venv creation may fail" >&2
 # Caddy (official repo) for automatic HTTPS
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null
@@ -33,6 +38,8 @@ else
   git clone "$REPO_URL" /opt/khp-panel
 fi
 cd /opt/khp-panel
+# Clean slate for re-runs: a failed earlier run leaves a broken half-made venv.
+rm -rf .venv
 python3 -m venv .venv
 .venv/bin/pip install -q -r requirements.txt
 # The service runs as www-data, so it must own the app dir (it writes the
