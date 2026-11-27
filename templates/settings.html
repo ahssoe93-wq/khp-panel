@@ -5,7 +5,7 @@
 <h2 class="sec">Servers</h2>
 <div id="settings-list"><div class="spin">Loading…</div></div>
 
-<h2 class="sec">Add a server</h2>
+<h2 class="sec" id="form-title">Add a server</h2>
 <div class="card">
   <div id="form-error"></div>
   <label>Display name *</label>
@@ -34,7 +34,8 @@
     <label style="margin:0"><input type="checkbox" id="f-sales" style="width:auto"> Sales server</label>
   </div>
   <div style="height:16px"></div>
-  <button class="btn block" onclick="addServer()">Save server</button>
+  <button class="btn block" id="save-btn" onclick="addServer()">Save server</button>
+  <button class="btn ghost" id="cancel-edit" style="display:none;margin-top:8px" onclick="cancelEdit()">Cancel edit</button>
   <p class="muted small" style="margin-top:10px">Passwords are stored encrypted on this panel only.
   Use "Test connection" on a server to check the login works.</p>
 </div>
