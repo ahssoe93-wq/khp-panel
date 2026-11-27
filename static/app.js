@@ -253,10 +253,20 @@ function renderServers() {
     const items = groups[g];
     const collapsed = !EXPANDED.has(g);
     const chev = collapsed ? '▼' : '▲';
+    // v6 polish: right side shows the server count + total keys and
+    // whether the whole group is online, with a green dot.
+    const hasHealth = items.some(s => HEALTH[s.id]);
+    const allOnline = hasHealth && items.every(s => HEALTH[s.id] && HEALTH[s.id].online);
+    const keysTotal = items.reduce((a, s) =>
+      a + ((HEALTH[s.id] && HEALTH[s.id].online) ? (HEALTH[s.id].clients || 0) : 0), 0);
     let html = '<div class="group-h" onclick="toggleGroup(\'' + esc(g) + '\')">' +
       '<span class="gflag">' + flagFor(g === 'Other' ? '' : g) + '</span>' +
-      '<b>' + esc(countryName(g)) + '</b><span class="muted small">• ' + items.length + ' server' +
-      (items.length === 1 ? '' : 's') + '</span>' +
+      '<b>' + esc(countryName(g)) + '</b>' +
+      (allOnline ? '<span class="dot"></span>' : '') +
+      '<div class="meta"><div class="n">' + items.length + ' server' +
+      (items.length === 1 ? '' : 's') + '</div>' +
+      '<div class="s">' + (hasHealth ? keysTotal.toLocaleString('en-US') + ' keys • ' +
+        (allOnline ? 'all online' : 'some down') : 'checking…') + '</div></div>' +
       '<span class="chev">' + chev + '</span></div>';
     if (collapsed) return html;
     html += items.map(s => {
@@ -341,10 +351,10 @@ function renderExpiring() {
     ' • ' + c.days_left + ' day' + (c.days_left === 1 ? '' : 's') + ' left</div></div>' +
     '<span class="status ' + c.status + '">' + c.status + '</span></div>' +
     '<div class="actions">' +
-    '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\')">Renew</button>' +
-    '<button class="btn ghost sm" onclick="swapKey(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this)">Swap</button>' +
-    '<button class="btn ghost sm" onclick="openEditModal(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', ' + Math.round((c.limit || 0) / 1073741824) + ', \'' + nameDateISO(c.name) + '\')">Edit</button>' +
-    '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this)">Copy link</button>' +
+    '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', \'' + (c.protocol || 'outline') + '\')">Renew</button>' +
+    '<button class="btn ghost sm" onclick="swapKey(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this, \'' + (c.protocol || 'outline') + '\')">Swap</button>' +
+    '<button class="btn ghost sm" onclick="openEditModal(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', ' + Math.round((c.limit || 0) / 1073741824) + ', \'' + nameDateISO(c.name) + '\', \'' + (c.protocol || 'outline') + '\')">Edit</button>' +
+    '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this, \'' + (c.protocol || 'outline') + '\')">Copy link</button>' +
     '</div></div>'
   ).join('') + (!EXPIRING_ALL && EXPIRING.length > 5
     ? '<button class="see-all" onclick="EXPIRING_ALL=true;renderExpiring()">See all ' + EXPIRING.length + ' →</button>'
@@ -362,7 +372,8 @@ async function globalSearch() {
     if (!j.results.length) { el.innerHTML = '<div class="empty">No key found for “' + esc(q) + '” on any server.</div>'; return; }
     el.innerHTML = j.results.map(c =>
       '<div class="card client" onclick="location.href=\'/server/' + c.server_id + '\'">' +
-      '<div class="row"><div class="grow"><div class="name">' + esc(c.name) + '</div>' +
+      '<div class="row"><div class="grow"><div class="name">' + esc(c.name) +
+      (c.protocol === 'vless' ? '<span class="badge-vless">VLESS</span>' : '') + '</div>' +
       '<div class="muted small">' + esc(c.server_name) + ' • ' + esc(c.used_h) + ' / ' + esc(c.limit_h) +
       ' • exp ' + esc(c.expiry_h) + '</div></div>' +
       '<span class="status ' + c.status + '">' + c.status + '</span></div></div>'
@@ -413,6 +424,14 @@ async function silentReloadServer(serverId) {
       ALL_CLIENTS = j.clients;
       document.getElementById('count-all').textContent = ALL_CLIENTS.length;
       renderClients();
+      // v6: quietly re-sync the VLESS list too, when the server has one.
+      if (HAS_VLESS) {
+        try {
+          const vj = await api('/api/server/' + serverId + '/vless-clients');
+          ALL_VLESS = vj.clients;
+          renderVlessClients();
+        } catch (e) { /* ignore — local rows already show the result */ }
+      }
     } else if (document.getElementById('server-list')) {
       refreshDashboardQuiet();
     }
@@ -441,6 +460,25 @@ function applyKeyPatch(serverId, oldName, patch) {
       }
     }
     renderClients();
+  }
+  // v6: the same patch can target a VLESS row — apply it there too.
+  if (typeof ALL_VLESS !== 'undefined' && document.getElementById('vless-list')) {
+    if (patch.remove) {
+      ALL_VLESS = ALL_VLESS.filter(c => c.name !== oldName);
+    } else {
+      const c = ALL_VLESS.find(x => x.name === oldName) ||
+        (patch.name ? ALL_VLESS.find(x => x.name === patch.name) : undefined);
+      if (c) {
+        if (patch.name) c.name = patch.name;
+        if (patch.expiry != null) { c.expiry = patch.expiry; c.expiry_h = patch.expiry_h || c.expiry_h; }
+        if (patch.limit != null) { c.limit = patch.limit; c.limit_h = fmtGB(patch.limit); c.pct = c.limit ? Math.min(100, Math.round(c.used * 100 / c.limit)) : 0; }
+        if (patch.used != null) { c.used = patch.used; c.used_h = fmtGB(patch.used); c.pct = c.limit ? Math.min(100, Math.round(c.used * 100 / c.limit)) : 0; }
+        if (patch.enable != null) c.enable = patch.enable;
+        if (patch.status) c.status = patch.status;
+        if (patch.created_at != null) c.created_at = patch.created_at;
+      }
+    }
+    renderVlessClients();
   }
   // dashboard "Expiring soon" rows use the same actions: keep them in sync
   if (document.getElementById('expiring') && EXP_LOADED) {
@@ -481,19 +519,95 @@ async function loadServerPage() {
     ALL_CLIENTS = j.clients;
     document.getElementById('count-all').textContent = ALL_CLIENTS.length;
     renderClients();
+    // v6: VLESS section (3X-UI only) — shown when the server has a
+    // VLESS inbound; the Add Key modal gets the Outline/VLESS switch.
+    if (j.vless && j.vless.length) {
+      HAS_VLESS = true;
+      const pw = document.getElementById('add-proto-wrap');
+      if (pw) pw.style.display = '';
+      const vs = document.getElementById('vless-section');
+      if (vs) vs.style.display = '';
+      try {
+        const vj = await api('/api/server/' + SERVER_ID + '/vless-clients');
+        ALL_VLESS = vj.clients;
+        renderVlessClients();
+      } catch (e) {
+        document.getElementById('vless-list').innerHTML =
+          '<div class="error">Could not load VLESS keys: ' + esc(e.message) + '</div>';
+      }
+    }
   } catch (e) {
     document.getElementById('client-list').innerHTML =
       '<div class="error">Could not load keys: ' + esc(e.message) + '</div>';
   }
   await healthP;
 }
+/* v6: the VLESS list mirrors the Outline list — same filter text,
+   same sort chips, same NEW / expiring-today marks. Rows carry two
+   copy buttons (WS + XHTTP) instead of one. */
+function filteredVless() {
+  const raw = document.getElementById('client-filter').value || '';
+  const pasted = nameFromPastedKey(raw);
+  const f = (pasted !== null ? pasted : raw).toLowerCase();
+  const now = Date.now() / 1000;
+  let list = ALL_VLESS.filter(c => c.name.toLowerCase().includes(f));
+  if (FILTER_BY === 'expiring')
+    list = list.filter(c => c.expiry && c.expiry - now <= 7 * 86400);
+  if (FILTER_BY === 'high')
+    list = list.filter(c => c.pct >= 70);
+  if (SORT_BY === 'newest') {
+    list.sort((a, b) => {
+      const ca = a.created_at || 0, cb = b.created_at || 0;
+      if ((ca > 0) !== (cb > 0)) return cb - ca;
+      if (ca && cb) return cb - ca;
+      return (a.expiry || 1e15) - (b.expiry || 1e15);
+    });
+  } else if (SORT_BY === 'expiry')
+    list.sort((a, b) => (a.expiry || 1e15) - (b.expiry || 1e15));
+  else if (SORT_BY === 'usage')
+    list.sort((a, b) => (b.used || 0) - (a.used || 0));
+  else
+    list.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+  return list;
+}
+function renderVlessClients() {
+  const el = document.getElementById('vless-list');
+  if (!el) return;
+  const list = filteredVless();
+  if (!list.length) { el.innerHTML = '<div class="empty">No VLESS keys found.</div>'; }
+  else {
+    el.innerHTML = list.map(c => {
+      const n = esc(c.name).replace(/'/g, "\\'");
+      const toggleLabel = c.enable ? 'Disable' : 'Enable';
+      const isNew = isNewKey(c);
+      return '<div class="card client' + (isExpiringToday(c) ? ' expiring-today' : '') + (isNew ? ' is-new' : '') + '">' +
+      '<div class="row"><div class="grow"><div class="name">' + esc(c.name) +
+      '<span class="badge-vless">VLESS</span>' + (isNew ? '<span class="badge-new">NEW</span>' : '') + '</div></div>' +
+      '<span class="status ' + c.status + '">' + c.status + '</span></div>' +
+      '<div class="muted small" style="margin-top:4px">' + esc(c.used_h) + ' / ' + esc(c.limit_h) + ' • exp ' + esc(c.expiry_h) + '</div>' +
+      '<div class="bar"><i style="width:' + c.pct + '%"></i></div>' +
+      '<div class="actions">' +
+      '<button class="btn ghost sm" onclick="copyVlessLink(' + c.server_id + ', \'' + n + '\', \'ws\', this)">Copy WS link</button>' +
+      '<button class="btn ghost sm" onclick="copyVlessLink(' + c.server_id + ', \'' + n + '\', \'xhttp\', this)">Copy XHTTP link</button>' +
+      '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + n + '\', \'vless\')">Renew</button>' +
+      '<button class="btn ghost sm" onclick="swapKey(' + c.server_id + ', \'' + n + '\', this, \'vless\')">Swap</button>' +
+      '<button class="btn ghost sm" onclick="toggleKey(' + c.server_id + ', \'' + n + '\', ' + (!c.enable) + ', this, \'vless\')">' + toggleLabel + '</button>' +
+      '<button class="btn ghost sm" onclick="openEditModal(' + c.server_id + ', \'' + n + '\', null, \'\', \'vless\')">Edit</button>' +
+      '<button class="btn ghost sm red" onclick="deleteKey(' + c.server_id + ', \'' + n + '\', this, \'vless\')">Delete</button>' +
+      '</div></div>';
+    }).join('');
+  }
+  document.getElementById('vless-info').textContent =
+    list.length + ' VLESS key' + (list.length === 1 ? '' : 's');
+}
 function nameFromPastedKey(text) {
-  // A pasted ss:// link -> the key name from its #fragment, or null.
-  // Handles this panel's `#<name>` and the 3X-UI panel's
+  // A pasted ss:// or vless:// link -> the key name from its #fragment,
+  // or null. Handles this panel's `#<name>` and the 3X-UI panel's
   // `#Outline-<name>-<GB>GB...` style. Lets the server-page filter find
   // a key from a pasted link, just like the dashboard search does.
   const s = (text || '').trim();
-  if (s.toLowerCase().indexOf('ss://') === -1) return null;
+  const low = s.toLowerCase();
+  if (low.indexOf('ss://') === -1 && low.indexOf('vless://') === -1) return null;
   const hash = s.indexOf('#');
   if (hash === -1) return null;
   let frag = s.slice(hash + 1).trim();
@@ -573,11 +687,27 @@ function renderClients() {
 }
 function loadMoreClients() { SHOWN += PAGE_SIZE; renderClients(); }
 function filterClients() { SHOWN = PAGE_SIZE; renderClients(); }
-async function copyLink(serverId, name, btn) {
+async function copyLink(serverId, name, btn, proto) {
   btn.disabled = true;
   try {
-    const j = await api('/api/server/' + serverId + '/link/' + encodeURIComponent(name));
-    await copyText(j.link, 'Link copied');
+    if (proto === 'vless') {
+      // vless: copy the WS link (primary); the XHTTP link is on the key card.
+      const j = await api('/api/server/' + serverId + '/vless-link/' + encodeURIComponent(name));
+      await copyText(j.links.ws || j.link, 'WS link copied');
+    } else {
+      const j = await api('/api/server/' + serverId + '/link/' + encodeURIComponent(name));
+      await copyText(j.link, 'Link copied');
+    }
+  } catch (e) { toast('Failed: ' + e.message); }
+  btn.disabled = false;
+}
+async function copyVlessLink(serverId, name, which, btn) {
+  btn.disabled = true;
+  try {
+    const j = await api('/api/server/' + serverId + '/vless-link/' + encodeURIComponent(name));
+    const link = j.links[which];
+    if (!link) throw new Error('no ' + which.toUpperCase() + ' link on this server');
+    await copyText(link, which.toUpperCase() + ' link copied');
   } catch (e) { toast('Failed: ' + e.message); }
   btn.disabled = false;
 }
@@ -598,11 +728,14 @@ function armOrRun(key, btn, armLabel, run) {
   ARMED[key] = false;
   run();
 }
-async function deleteKey(serverId, name, btn) {
-  armOrRun('del:' + name, btn, 'Sure?', async () => {
+async function deleteKey(serverId, name, btn, proto) {
+  armOrRun('del:' + (proto || 'outline') + ':' + name, btn, 'Sure?', async () => {
     clearQuietSync();
     try {
-      await api('/api/server/' + serverId + '/delete-key', {
+      const url = proto === 'vless'
+        ? '/api/server/' + serverId + '/delete-vless-key'
+        : '/api/server/' + serverId + '/delete-key';
+      await api(url, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name})});
       toast('Deleted ' + name);
@@ -611,16 +744,24 @@ async function deleteKey(serverId, name, btn) {
     } catch (e) { toast('Delete failed: ' + e.message); }
   });
 }
-async function swapKey(serverId, name, btn) {
+async function swapKey(serverId, name, btn, proto) {
   clearQuietSync();
-  armOrRun('swap:' + name, btn, 'Swap?', async () => {
+  armOrRun('swap:' + (proto || 'outline') + ':' + name, btn, 'Swap?', async () => {
     btn.disabled = true;
     try {
-      const j = await api('/api/server/' + serverId + '/clients/' + encodeURIComponent(name) + '/swap',
+      const base = proto === 'vless'
+        ? '/api/server/' + serverId + '/vless-clients/' + encodeURIComponent(name)
+        : '/api/server/' + serverId + '/clients/' + encodeURIComponent(name);
+      const j = await api(base + '/swap',
         {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
-      showActionResult(j.name, j.link, 'Swapped — new password, same name / expiry / GB');
+      if (proto === 'vless') {
+        showActionResult(j.name, j.links.ws || j.link,
+          'Swapped — new UUID, same name / expiry / GB', j.links.xhttp);
+      } else {
+        showActionResult(j.name, j.link, 'Swapped — new password, same name / expiry / GB');
+      }
       toast('Swapped ' + name);
-      // fresh password => used traffic resets to 0; it is a new key now
+      // fresh password/UUID => used traffic resets to 0; it is a new key now
       applyKeyPatch(serverId, name, {used: 0, limit: j.limit || undefined,
         created_at: j.created_at || undefined});
       scheduleQuietSync(serverId);
@@ -628,11 +769,14 @@ async function swapKey(serverId, name, btn) {
     btn.disabled = false;
   });
 }
-async function toggleKey(serverId, name, enable, btn) {
+async function toggleKey(serverId, name, enable, btn, proto) {
   clearQuietSync();
   btn.disabled = true;
   try {
-    const j = await api('/api/server/' + serverId + '/clients/' + encodeURIComponent(name) + '/toggle',
+    const base = proto === 'vless'
+      ? '/api/server/' + serverId + '/vless-clients/' + encodeURIComponent(name)
+      : '/api/server/' + serverId + '/clients/' + encodeURIComponent(name);
+    const j = await api(base + '/toggle',
       {method: 'POST', headers: {'Content-Type': 'application/json'},
        body: JSON.stringify({enable})});
     toast((j.enable ? 'Enabled ' : 'Disabled ') + name);
@@ -652,7 +796,7 @@ function openActionModal(title, bodyHtml) {
 function closeActionModal() {
   document.getElementById('action-modal').classList.remove('open');
 }
-function showActionResult(name, link, note) {
+function showActionResult(name, link, note, link2) {
   document.getElementById('action-result-name').textContent =
     name + (note ? '  •  ' + note : '');
   const lb = document.getElementById('action-result-link');
@@ -663,30 +807,46 @@ function showActionResult(name, link, note) {
   } else {
     lb.style.display = 'none'; cb.style.display = 'none';
   }
+  // v6: VLESS results carry a second link (XHTTP) with its own copy button.
+  const wrap2 = document.getElementById('action-result-link2-wrap');
+  const lb2 = document.getElementById('action-result-link2');
+  if (link2) {
+    lb2.textContent = link2; wrap2.style.display = '';
+  } else if (wrap2) {
+    wrap2.style.display = 'none';
+  }
   document.getElementById('action-body').style.display = 'none';
   document.getElementById('action-result').style.display = '';
 }
-function openRenewModal(serverId, name) {
+function openRenewModal(serverId, name, proto) {
   openActionModal('Renew key — ' + name,
     '<p class="muted">New expiry = old expiry + 30 / 60 / 90 days. ' +
     'The key is renamed to the new date. GB stays the same.</p>' +
     '<div style="height:12px"></div>' +
     '<div class="seg">' +
-    '<button type="button" onclick="submitRenew(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', 1, this)">+1 mo</button>' +
-    '<button type="button" onclick="submitRenew(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', 2, this)">+2 mo</button>' +
-    '<button type="button" onclick="submitRenew(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', 3, this)">+3 mo</button>' +
+    '<button type="button" onclick="submitRenew(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', 1, this, \'' + (proto || 'outline') + '\')">+1 mo</button>' +
+    '<button type="button" onclick="submitRenew(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', 2, this, \'' + (proto || 'outline') + '\')">+2 mo</button>' +
+    '<button type="button" onclick="submitRenew(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', 3, this, \'' + (proto || 'outline') + '\')">+3 mo</button>' +
     '</div><div style="height:10px"></div>' +
     '<button class="btn ghost block" onclick="closeActionModal()">Cancel</button>');
 }
-async function submitRenew(serverId, name, months, btn) {
+async function submitRenew(serverId, name, months, btn, proto) {
   clearQuietSync();
   btn.disabled = true;
   try {
-    const j = await api('/api/server/' + serverId + '/clients/' + encodeURIComponent(name) + '/renew',
+    const base = proto === 'vless'
+      ? '/api/server/' + serverId + '/vless-clients/' + encodeURIComponent(name)
+      : '/api/server/' + serverId + '/clients/' + encodeURIComponent(name);
+    const j = await api(base + '/renew',
       {method: 'POST', headers: {'Content-Type': 'application/json'},
        body: JSON.stringify({months})});
-    showActionResult(j.name, j.link,
-      'renewed +' + months + ' mo • ' + j.gb + ' GB • exp ' + j.expiry_h);
+    if (proto === 'vless') {
+      showActionResult(j.name, j.links.ws || j.link,
+        'renewed +' + months + ' mo • ' + j.gb + ' GB • exp ' + j.expiry_h, j.links.xhttp);
+    } else {
+      showActionResult(j.name, j.link,
+        'renewed +' + months + ' mo • ' + j.gb + ' GB • exp ' + j.expiry_h);
+    }
     toast('Renewed → ' + j.name);
     applyKeyPatch(serverId, name, {name: j.name, expiry: j.expiry,
       expiry_h: j.expiry_h, limit: j.gb * 1073741824});
@@ -701,11 +861,12 @@ function nameDateISO(name) {
   if (!m) return '';
   return m[3] + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0');
 }
-function openEditModal(serverId, name, gbPrefill, datePrefill) {
+function openEditModal(serverId, name, gbPrefill, datePrefill, proto) {
   let gbVal = gbPrefill, dateVal = datePrefill;
   if (gbVal == null || !dateVal) {
-    const c = (typeof ALL_CLIENTS !== 'undefined')
-      ? ALL_CLIENTS.find(x => x.name === name) : null;
+    const list = (proto === 'vless' && typeof ALL_VLESS !== 'undefined')
+      ? ALL_VLESS : (typeof ALL_CLIENTS !== 'undefined' ? ALL_CLIENTS : []);
+    const c = list.find(x => x.name === name);
     if (c) {
       if (gbVal == null) gbVal = Math.round((c.limit || 0) / 1073741824) || 400;
       if (!dateVal) dateVal = nameDateISO(name);
@@ -725,10 +886,10 @@ function openEditModal(serverId, name, gbPrefill, datePrefill) {
     '<label>Expiry date</label>' +
     '<input id="edit-date" type="date" value="' + dateVal + '">' +
     '<div style="height:12px"></div>' +
-    '<div class="row"><button class="btn" id="edit-save" style="flex:1" onclick="submitEdit(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', this)">Save changes</button>' +
+    '<div class="row"><button class="btn" id="edit-save" style="flex:1" onclick="submitEdit(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', this, \'' + (proto || 'outline') + '\')">Save changes</button>' +
     '<button class="btn ghost" style="flex:1" onclick="closeActionModal()">Cancel</button></div>');
 }
-async function submitEdit(serverId, name, btn) {
+async function submitEdit(serverId, name, btn, proto) {
   clearQuietSync();
   const gbRaw = document.getElementById('edit-gb').value;
   const dateRaw = document.getElementById('edit-date').value;
@@ -739,11 +900,19 @@ async function submitEdit(serverId, name, btn) {
   if (!body.gb && !body.expiry_date) { toast('Change the GB or the date first'); return; }
   btn.disabled = true; btn.textContent = 'Saving…';
   try {
-    const j = await api('/api/server/' + serverId + '/clients/' + encodeURIComponent(name) + '/edit',
+    const base = proto === 'vless'
+      ? '/api/server/' + serverId + '/vless-clients/' + encodeURIComponent(name)
+      : '/api/server/' + serverId + '/clients/' + encodeURIComponent(name);
+    const j = await api(base + '/edit',
       {method: 'POST', headers: {'Content-Type': 'application/json'},
        body: JSON.stringify(body)});
     if (j.name && j.name !== name) {
-      showActionResult(j.name, j.link, 'edited • ' + j.gb + ' GB • exp ' + j.expiry_h);
+      if (proto === 'vless') {
+        showActionResult(j.name, j.links.ws || j.link,
+          'edited • ' + j.gb + ' GB • exp ' + j.expiry_h, j.links.xhttp);
+      } else {
+        showActionResult(j.name, j.link, 'edited • ' + j.gb + ' GB • exp ' + j.expiry_h);
+      }
     } else {
       toast('Updated • ' + j.gb + ' GB • exp ' + j.expiry_h);
       closeActionModal();
@@ -757,6 +926,8 @@ async function submitEdit(serverId, name, btn) {
 function openAddKey() {
   document.getElementById('add-form').style.display = '';
   document.getElementById('add-result').style.display = 'none';
+  const xw = document.getElementById('add-result-xhttp-wrap');
+  if (xw) xw.style.display = 'none';
   document.getElementById('add-modal').classList.add('open');
   document.getElementById('add-name').focus();
 }
@@ -785,19 +956,46 @@ async function submitAddKey() {
     if (picked < today) { toast('Expiry date is in the past'); return; }
     body.expiry_date = dateRaw;
   }
+  const protoBtn = document.querySelector('#add-proto .sel');
+  const proto = protoBtn ? protoBtn.dataset.p : 'outline';
   btn.disabled = true; btn.textContent = 'Creating…';
   try {
-    const j = await api('/api/server/' + SERVER_ID + '/add-key', {
+    // v6: VLESS keys go to the vless endpoint (same UUID on every
+    // VLESS inbound); Outline keys keep the v5.1 endpoint.
+    const url = proto === 'vless'
+      ? '/api/server/' + SERVER_ID + '/add-vless-key'
+      : '/api/server/' + SERVER_ID + '/add-key';
+    const j = await api(url, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body)});
     document.getElementById('add-result-name').textContent =
       j.name + '  •  ' + j.summary;
-    document.getElementById('add-result-link').textContent = j.link;
+    const link = proto === 'vless' ? (j.links.ws || j.link) : j.link;
+    document.getElementById('add-result-link').textContent = link;
+    const xw = document.getElementById('add-result-xhttp-wrap');
+    if (proto === 'vless' && j.links && j.links.xhttp) {
+      document.getElementById('add-result-xhttp').textContent = j.links.xhttp;
+      xw.style.display = '';
+    } else if (xw) {
+      xw.style.display = 'none';
+    }
     document.getElementById('add-form').style.display = 'none';
     document.getElementById('add-result').style.display = '';
     // v4: the new key appears at the top AT ONCE (Newest sort + NEW badge)
     // — no waiting for a full list re-fetch.
-    if (typeof ALL_CLIENTS !== 'undefined') {
+    if (proto === 'vless') {
+      if (typeof ALL_VLESS !== 'undefined') {
+        ALL_VLESS.unshift({
+          name: j.name, server_id: SERVER_ID, status: 'active', enable: true,
+          used: 0, used_h: '0 GB', limit: j.limit, limit_h: fmtGB(j.limit),
+          expiry: j.expiry_ts, expiry_h: j.expiry_h, pct: 0,
+          created_at: j.created_at || Math.floor(Date.now() / 1000),
+          protocol: 'vless',
+        });
+        SHOWN = PAGE_SIZE;
+        renderVlessClients();
+      }
+    } else if (typeof ALL_CLIENTS !== 'undefined') {
       ALL_CLIENTS.unshift({
         name: j.name, server_id: SERVER_ID, status: 'active', enable: true,
         used: 0, used_h: '0 GB', limit: j.limit, limit_h: fmtGB(j.limit),
@@ -988,7 +1186,8 @@ function settingsListHtml(servers) {
     (s.is_free ? '<span class="badge-free">FREE</span>' : '') +
     (s.is_sales ? '<span class="badge-sales">SALES</span>' : '') +
     '<div class="muted small">' + esc(s.type === 'xui' ? '3X-UI' : 'Marzban') + ' • ' + esc(countryName(s.country)) + '</div>' +
-    '<div class="muted small">' + esc(s.base_url) + '</div></div></div>' +
+    '<div class="muted small">' + esc(s.base_url) + '</div>' +
+    '<div class="muted small">Owner: ' + esc(s.owner || 'admin') + '</div></div></div>' +
     '<div class="row" style="margin-top:12px">' +
     '<button class="btn ghost" onclick="editServer(' + s.id + ')">Edit</button>' +
     '<button class="btn ghost" onclick="testServer(' + s.id + ', this)">Test connection</button>' +
@@ -1012,6 +1211,8 @@ async function loadSettings() {
     document.getElementById('settings-list').innerHTML =
       '<div class="error">Could not load servers: ' + esc(e.message) + '</div>';
   }
+  // v6: the reseller list (owner dropdown + Users section) loads too.
+  loadUsers();
 }
 async function testServer(id, btn) {
   btn.disabled = true;
@@ -1058,6 +1259,7 @@ function editServer(id) {
   EDITING_ID = id;
   document.getElementById('f-name').value = s.name || '';
   document.getElementById('f-country').value = s.country || '';
+  document.getElementById('f-owner').value = s.owner || 'admin';
   document.getElementById('f-type').value = s.type || 'xui';
   document.getElementById('f-base').value = s.base_url || '';
   document.getElementById('f-path').value = s.panel_path || '';
@@ -1078,6 +1280,7 @@ function cancelEdit() {
   EDITING_ID = null;
   ['f-name', 'f-country', 'f-base', 'f-path', 'f-pw', 'f-host'].forEach(i => document.getElementById(i).value = '');
   document.getElementById('f-type').value = 'xui';
+  document.getElementById('f-owner').value = 'admin';
   document.getElementById('f-user').value = 'kohein';
   document.getElementById('f-pw').placeholder = 'Panel admin password';
   document.getElementById('f-port').value = 1080;
@@ -1092,6 +1295,7 @@ async function addServer() {
   const body = {
     name: document.getElementById('f-name').value.trim(),
     country: document.getElementById('f-country').value.trim(),
+    owner: document.getElementById('f-owner').value,
     type: document.getElementById('f-type').value,
     base_url: document.getElementById('f-base').value.trim(),
     panel_path: document.getElementById('f-path').value.trim(),
@@ -1120,5 +1324,153 @@ async function addServer() {
     loadSettings();
   } catch (e) {
     err.innerHTML = '<div class="error">' + esc(e.message) + '</div>';
+  }
+}
+
+/* ---------------- v6: reseller accounts + bulk import ----------------
+   Users are Super Admin only. A reseller logs in with their own
+   username + password and sees only their own servers; their channel
+   name (display_name) shows in the panel header. Passwords are never
+   returned by the API and never rendered here. */
+let USERS = [];
+function usersListHtml(users) {
+  if (!users.length) return '<div class="empty">No resellers yet.</div>';
+  return users.map(u => {
+    const n = esc(u.username).replace(/'/g, "\\'");
+    const isAdmin = u.role === 'admin';
+    return '<div class="card"><div class="row"><div class="grow">' +
+      '<b style="font-size:17px">' + esc(u.username) + '</b> ' +
+      '<span class="badge-' + (isAdmin ? 'outline' : 'vless') + '">' +
+      (isAdmin ? 'ADMIN' : 'RESELLER') + '</span>' +
+      '<div class="muted small">' + esc(u.display_name || '') +
+      (u.created_at ? ' • since ' + esc(u.created_at) : '') + '</div></div></div>' +
+      (isAdmin ? '<div class="muted small" style="margin-top:8px">The Super Admin can never be deleted.</div>'
+        : '<div style="margin-top:10px">' +
+          '<label>Display name (channel name)</label>' +
+          '<input id="u-disp-' + esc(u.username) + '" value="' + esc(u.display_name || '') + '">' +
+          '<label>New password (blank = keep current)</label>' +
+          '<input id="u-pw-' + esc(u.username) + '" type="password" placeholder="At least 6 characters" autocomplete="new-password">' +
+          '<div class="row" style="margin-top:10px">' +
+          '<button class="btn ghost" onclick="saveUser(\'' + n + '\', this)">Save</button>' +
+          '<button class="btn ghost" style="color:var(--red);border-color:rgba(239,68,68,.5)" onclick="deleteUser(\'' + n + '\', this)">Delete</button>' +
+          '</div></div>') +
+      '</div>';
+  }).join('');
+}
+function populateOwnerDropdown(users) {
+  const sel = document.getElementById('f-owner');
+  if (!sel) return;
+  const cur = sel.value || 'admin';
+  let opts = '<option value="admin">admin (me)</option>';
+  users.forEach(u => {
+    if (u.role === 'reseller') {
+      opts += '<option value="' + esc(u.username) + '">' + esc(u.username) + ' — ' + esc(u.display_name || '') + '</option>';
+    }
+  });
+  sel.innerHTML = opts;
+  sel.value = cur;
+  if (sel.value !== cur) sel.value = 'admin';
+}
+async function loadUsers() {
+  try {
+    const j = await api('/api/users');
+    USERS = j.users;
+    const el = document.getElementById('users-list');
+    if (el) el.innerHTML = usersListHtml(j.users);
+    populateOwnerDropdown(j.users);
+  } catch (e) {
+    const el = document.getElementById('users-list');
+    if (el) el.innerHTML = '<div class="error">Could not load users: ' + esc(e.message) + '</div>';
+  }
+}
+async function addUser() {
+  const err = document.getElementById('user-form-error');
+  const body = {
+    username: document.getElementById('u-name').value.trim(),
+    display_name: document.getElementById('u-display').value.trim(),
+    password: document.getElementById('u-pw').value,
+  };
+  try {
+    await api('/api/users', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)});
+    toast('Reseller added: ' + body.username);
+    document.getElementById('u-name').value = '';
+    document.getElementById('u-display').value = '';
+    document.getElementById('u-pw').value = '';
+    err.innerHTML = '';
+    loadUsers();
+  } catch (e) {
+    err.innerHTML = '<div class="error">' + esc(e.message) + '</div>';
+  }
+}
+async function saveUser(username, btn) {
+  const disp = document.getElementById('u-disp-' + username).value.trim();
+  const pw = document.getElementById('u-pw-' + username).value;
+  btn.disabled = true;
+  try {
+    if (disp) {
+      await api('/api/users/' + encodeURIComponent(username), {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({display_name: disp})});
+    }
+    if (pw) {
+      await api('/api/users/' + encodeURIComponent(username), {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({password: pw})});
+    }
+    toast('Saved ' + username);
+    loadUsers();
+  } catch (e) { toast('Save failed: ' + e.message); }
+  btn.disabled = false;
+}
+const ARMED_USER_DEL = {};
+async function deleteUser(username, btn) {
+  if (!ARMED_USER_DEL[username]) {
+    ARMED_USER_DEL[username] = true;
+    btn.textContent = 'Click again to delete';
+    setTimeout(() => {
+      ARMED_USER_DEL[username] = false;
+      if (btn.isConnected) btn.textContent = 'Delete';
+    }, 4000);
+    return;
+  }
+  ARMED_USER_DEL[username] = false;
+  try {
+    await api('/api/users/' + encodeURIComponent(username), {method: 'DELETE'});
+    toast('Deleted ' + username);
+  } catch (e) {
+    toast('Delete failed: ' + e.message);
+  }
+  loadUsers();
+}
+async function importServers() {
+  const out = document.getElementById('import-result');
+  const raw = document.getElementById('import-json').value.trim();
+  if (!raw) { toast('Paste a JSON array of servers first'); return; }
+  let arr;
+  try {
+    arr = JSON.parse(raw);
+  } catch (e) {
+    out.innerHTML = '<div class="error">Not valid JSON: ' + esc(e.message) + '</div>';
+    return;
+  }
+  out.innerHTML = '<div class="spin">Importing…</div>';
+  try {
+    const j = await api('/api/servers/import', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(arr)});
+    let html = '<div class="card" style="margin-top:0"><b>Imported ' + j.added + '</b>' +
+      ' • skipped ' + j.skipped + ' duplicate' + (j.skipped === 1 ? '' : 's') + '.';
+    if (j.errors && j.errors.length) {
+      html += '<div class="muted small" style="margin-top:6px">Problems:</div><ul class="muted small">' +
+        j.errors.map(e => '<li>' + esc(e) + '</li>').join('') + '</ul>';
+    }
+    html += '</div>';
+    out.innerHTML = html;
+    toast('Import done: ' + j.added + ' added');
+    loadSettings();
+  } catch (e) {
+    out.innerHTML = '<div class="error">Import failed: ' + esc(e.message) + '</div>';
   }
 }
