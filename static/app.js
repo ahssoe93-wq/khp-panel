@@ -200,6 +200,7 @@ async function submitAddKey() {
 async function loadSettings() {
   try {
     const j = await api('/api/servers');
+    SERVERS = j.servers; // editServer() reads from this global
     const el = document.getElementById('settings-list');
     if (!j.servers.length) { el.innerHTML = '<div class="empty">No servers yet.</div>'; return; }
     el.innerHTML = j.servers.map(s =>
@@ -208,8 +209,9 @@ async function loadSettings() {
       '<span class="muted small">' + esc(s.type === 'xui' ? '3X-UI' : 'Marzban') + ' • ' + esc(s.country || '') + '</span>' +
       '<div class="muted small">' + esc(s.base_url) + '</div></div></div>' +
       '<div class="row" style="margin-top:12px">' +
+      '<button class="btn ghost" onclick="editServer(' + s.id + ')">Edit</button>' +
       '<button class="btn ghost" onclick="testServer(' + s.id + ', this)">Test connection</button>' +
-      '<button class="btn ghost" style="color:var(--red);border-color:rgba(239,68,68,.5)" onclick="removeServer(' + s.id + ', \'' + esc(s.name) + '\')">Remove</button>' +
+      '<button class="btn ghost" style="color:var(--red);border-color:rgba(239,68,68,.5)" onclick="removeServer(' + s.id + ', \'' + esc(s.name) + '\', this)">Remove</button>' +
       '</div><div class="muted small" id="test-' + s.id + '" style="margin-top:8px"></div></div>'
     ).join('');
   } catch (e) {
@@ -231,11 +233,66 @@ async function testServer(id, btn) {
   }
   btn.disabled = false;
 }
-async function removeServer(id, name) {
-  if (!confirm('Remove server ' + name + ' from this panel?\n(This only removes it from KHP Panel — the server itself is untouched.)')) return;
-  await api('/api/servers/' + id, {method: 'DELETE'});
-  toast('Removed ' + name);
+// Two-click remove: window.confirm() dialogs are auto-dismissed by automated
+// browsers (and by some mobile browsers), so the first click only arms the
+// button and the second click (within 4s) actually removes. Removing a server
+// only deletes this panel's own record — the real server is untouched.
+const ARMED_REMOVE = {};
+async function removeServer(id, name, btn) {
+  if (!ARMED_REMOVE[id]) {
+    ARMED_REMOVE[id] = true;
+    btn.textContent = 'Click again to remove';
+    setTimeout(() => {
+      ARMED_REMOVE[id] = false;
+      if (btn.isConnected) btn.textContent = 'Remove';
+    }, 4000);
+    return;
+  }
+  ARMED_REMOVE[id] = false;
+  try {
+    await api('/api/servers/' + id, {method: 'DELETE'});
+    toast('Removed ' + name);
+  } catch (e) {
+    toast('Remove failed: ' + e.message);
+  }
   loadSettings();
+}
+let EDITING_ID = null;
+function editServer(id) {
+  const s = SERVERS.find(x => x.id === id);
+  if (!s) return;
+  EDITING_ID = id;
+  document.getElementById('f-name').value = s.name || '';
+  document.getElementById('f-country').value = s.country || '';
+  document.getElementById('f-type').value = s.type || 'xui';
+  document.getElementById('f-base').value = s.base_url || '';
+  document.getElementById('f-path').value = s.panel_path || '';
+  document.getElementById('f-user').value = s.admin_user || 'kohein';
+  document.getElementById('f-pw').value = '';
+  document.getElementById('f-pw').placeholder = 'Leave blank to keep the current password';
+  document.getElementById('f-host').value = s.share_host || '';
+  document.getElementById('f-port').value = s.share_port || 1080;
+  document.getElementById('f-free').checked = !!s.is_free;
+  document.getElementById('f-sales').checked = !!s.is_sales;
+  document.getElementById('form-title').textContent = 'Edit server: ' + s.name;
+  document.getElementById('save-btn').textContent = 'Save changes';
+  document.getElementById('cancel-edit').style.display = '';
+  document.getElementById('form-error').innerHTML = '';
+  window.scrollTo({top: document.getElementById('form-title').offsetTop - 10, behavior: 'smooth'});
+}
+function cancelEdit() {
+  EDITING_ID = null;
+  ['f-name', 'f-country', 'f-base', 'f-path', 'f-pw', 'f-host'].forEach(i => document.getElementById(i).value = '');
+  document.getElementById('f-type').value = 'xui';
+  document.getElementById('f-user').value = 'kohein';
+  document.getElementById('f-pw').placeholder = 'Panel admin password';
+  document.getElementById('f-port').value = 1080;
+  document.getElementById('f-free').checked = false;
+  document.getElementById('f-sales').checked = false;
+  document.getElementById('form-title').textContent = 'Add a server';
+  document.getElementById('save-btn').textContent = 'Save server';
+  document.getElementById('cancel-edit').style.display = 'none';
+  document.getElementById('form-error').innerHTML = '';
 }
 async function addServer() {
   const body = {
@@ -253,12 +310,19 @@ async function addServer() {
   };
   const err = document.getElementById('form-error');
   try {
-    const j = await api('/api/servers', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body)});
-    toast('Server saved');
-    document.getElementById('f-name').value = '';
-    document.getElementById('f-pw').value = '';
+    if (EDITING_ID) {
+      // Blank password in edit mode keeps the stored one (server ignores it).
+      await api('/api/servers/' + EDITING_ID, {
+        method: 'PUT', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body)});
+      toast('Server updated');
+    } else {
+      await api('/api/servers', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body)});
+      toast('Server saved');
+    }
+    cancelEdit();
     loadSettings();
   } catch (e) {
     err.innerHTML = '<div class="error">' + esc(e.message) + '</div>';
