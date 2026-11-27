@@ -5,9 +5,9 @@
 <p><a href="{{ url_for('dashboard') }}">← All servers</a></p>
 <div class="card">
   <div class="row">
-    <div class="flag">{{ {'Singapore': 'SG', 'Thailand': 'TH', 'Japan': 'JP'}.get(server.country, (server.country[:2].upper() if server.country else '??')) }}</div>
+    <div class="flag flag-emoji">{{ {'Singapore': '🇸🇬', 'Thailand': '🇹🇭', 'Japan': '🇯🇵'}.get(server.country, (server.country[:2].upper() if server.country else '??')) }}</div>
     <div class="grow">
-      <h2>{{ server.name }}{% if server.is_free %}<span class="badge-free">FREE</span>{% endif %}</h2>
+      <h2>{{ server.name }}{% if server.is_free %}<span class="badge-free">FREE</span>{% endif %}{% if server.is_sales %}<span class="badge-sales">SALES</span>{% endif %}</h2>
       <div class="muted small">{{ server.country }} • {{ '3X-UI' if server.type=='xui' else 'Marzban' }} • <span id="srv-status">checking…</span></div>
     </div>
     <span class="dot" id="srv-dot"></span>
@@ -20,7 +20,20 @@
 <div class="searchbox">
   <input id="client-filter" type="search" placeholder="Search keys on this server…" autocomplete="off">
 </div>
+<div class="chips" id="sort-chips">
+  <span class="muted small" style="align-self:center">Sort:</span>
+  <button type="button" class="chip-btn sel" data-sort="expiry">Expiry ↓</button>
+  <button type="button" class="chip-btn" data-sort="usage">Usage</button>
+  <button type="button" class="chip-btn" data-sort="name">Name</button>
+</div>
+<div class="chips" id="filter-chips">
+  <button type="button" class="chip-btn sel blue" data-filter="all">All <span id="count-all"></span></button>
+  <button type="button" class="chip-btn" data-filter="expiring">Expiring</button>
+  <button type="button" class="chip-btn" data-filter="high">High usage</button>
+</div>
 <div id="client-list"><div class="spin">Loading keys…</div></div>
+<div class="muted small" id="page-info" style="margin:6px 2px 10px"></div>
+<button class="btn ghost block" id="load-more" style="display:none" onclick="loadMoreClients()">Load more ▼</button>
 
 <div class="modal-back" id="add-modal">
   <div class="modal">
@@ -55,10 +68,25 @@
 const SERVER_ID = {{ server.id }};
 let ALL_CLIENTS = [];
 loadServerPage();
-document.getElementById('client-filter').addEventListener('input', filterClients);
+document.getElementById('client-filter').addEventListener('input', () => { SHOWN = PAGE_SIZE; renderClients(); });
+document.querySelectorAll('#sort-chips .chip-btn').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('#sort-chips .chip-btn').forEach(x => x.classList.remove('sel'));
+  b.classList.add('sel');
+  SORT_BY = b.dataset.sort;
+  SHOWN = PAGE_SIZE;
+  renderClients();
+}));
+document.querySelectorAll('#filter-chips .chip-btn').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('#filter-chips .chip-btn').forEach(x => x.classList.remove('sel'));
+  b.classList.add('sel');
+  FILTER_BY = b.dataset.filter;
+  SHOWN = PAGE_SIZE;
+  renderClients();
+}));
 document.querySelectorAll('#add-months button').forEach(b => b.addEventListener('click', () => {
   document.querySelectorAll('#add-months button').forEach(x => x.classList.remove('sel'));
   b.classList.add('sel');
 }));
+if (location.hash === '#add') openAddKey();
 </script>
 {% endblock %}
