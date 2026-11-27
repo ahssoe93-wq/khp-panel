@@ -43,6 +43,31 @@ let CHECKED_AT = 0;
 let DASH_TIMER = null; // 60s quiet auto-refresh timer (cleared on tab switch)
 let NAV_CACHE = {}; // prefetched tab HTML, for instant tab switching
 let lastServersHtml = null, lastExpiringHtml = null;
+// v4.3: the tab cache + dashboard state live in sessionStorage so they
+// survive full page loads — every server-page visit is a fresh JS
+// context, and without this each return to the dashboard re-flashed
+// "Loading servers…" + "–" stats. Restored instantly on load; the quiet
+// refresh updates the numbers behind it within seconds.
+try {
+  const _s = JSON.parse(sessionStorage.getItem('khp_nav_cache_v1') || 'null');
+  if (_s) {
+    NAV_CACHE = _s.nav || {};
+    SERVERS = _s.servers || [];
+    HEALTH = _s.health || {};
+    CHECKED_AT = _s.checkedAt || 0;
+    EXPIRING = _s.expiring || [];
+    EXP_LOADED = !!_s.expLoaded;
+    EXP_COUNTS = {};
+    EXPIRING.forEach(c => { EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1; });
+  }
+} catch (e) { /* private mode / quota: in-memory cache still works */ }
+function persistTabCache() {
+  try {
+    sessionStorage.setItem('khp_nav_cache_v1', JSON.stringify({
+      nav: NAV_CACHE, servers: SERVERS, health: HEALTH,
+      checkedAt: CHECKED_AT, expiring: EXPIRING, expLoaded: EXP_LOADED}));
+  } catch (e) { /* ignore */ }
+}
 const COUNTRY_ORDER = ['Singapore', 'Japan', 'Thailand'];
 /* Inline SVG country flags (v3) — drawn shapes, NO emoji font needed.
    Emoji flags rendered as plain "SG"/"TH"/"JP" letters on the user's
@@ -794,6 +819,7 @@ function snapshotTab(url) {
   const sf = document.getElementById('server-filter');
   NAV_CACHE[url] = {title: document.title, html: main.innerHTML, populated: true,
     q: q ? q.value : '', sf: sf ? sf.value : ''};
+  persistTabCache();
 }
 function bindDashboardInputs() {
   const sf = document.getElementById('server-filter');
@@ -814,6 +840,25 @@ function initDashboardQuiet() {
   bindDashboardInputs();
   refreshDashboardQuiet();
   setTimeout(() => prefetchTab('/settings'), 800);
+}
+/* v4.3: on a fresh dashboard load, restore the last populated snapshot
+   instantly (no "–" stats, no spinner) and refresh quietly behind it. */
+function initDashboardSmart() {
+  const snap = NAV_CACHE['/dashboard'];
+  if (snap && snap.populated) {
+    const main = document.querySelector('main');
+    if (main) {
+      lastServersHtml = null; lastExpiringHtml = null;
+      main.innerHTML = snap.html;
+      const q = document.getElementById('q');
+      if (q && snap.q) q.value = snap.q;
+      const sf = document.getElementById('server-filter');
+      if (sf && snap.sf) sf.value = snap.sf;
+    }
+    initDashboardQuiet();
+  } else {
+    initDashboard();
+  }
 }
 function swapMain(url, data, push) {
   const main = document.querySelector('main');
@@ -919,7 +964,12 @@ function settingsListHtml(servers) {
 async function loadSettings() {
   try {
     const j = await api('/api/servers');
+    // v4.3: if the server list itself changed (add/remove), the cached
+    // dashboard snapshot is stale — drop it so the next dashboard visit
+    // loads fresh instead of showing a removed server.
+    const prevIds = SERVERS.map(s => s.id).join(',');
     SERVERS = j.servers; // editServer() reads from this global
+    if (SERVERS.map(s => s.id).join(',') !== prevIds) delete NAV_CACHE['/dashboard'];
     const el = document.getElementById('settings-list');
     el.innerHTML = settingsListHtml(j.servers);
     snapshotTab('/settings');
