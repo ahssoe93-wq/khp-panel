@@ -6,7 +6,12 @@
 <title>{% block title %}KHP Panel{% endblock %}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body>
+<body data-role="{{ session.get('role') or '' }}" data-user="{{ session.get('username') or '' }}">
+{# v6.1.1: the role + username are baked into the page so app.js knows
+   them at load time — the sessionStorage snapshot-restore path never
+   fetches /api/servers, so it cannot learn the role any other way
+   (that was the defect-1 bug: IS_ADMIN stayed false after a fresh
+   login whenever a snapshot existed). #}
 <header>
   <img class="logo-img" src="{{ url_for('static', filename='logo.png') }}" alt="KHP">
   <div>
