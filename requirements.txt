@@ -2,6 +2,6 @@
 # the installer prefers). Flask 3.1.x, cryptography 44+ and gunicorn 23+
 # all require Python >= 3.9, so they cannot install into a 3.8 venv.
 Flask==3.0.3
-requests==2.34.2
+requests==2.32.4
 cryptography==43.0.3
 gunicorn==22.0.0
