@@ -1,4 +1,4 @@
-# KHP Panel v1
+# KHP Panel v2
 
 One login, all servers in one place. A custom admin panel for Aung Hein Soe's
 Outline VPN business — it talks to his existing 3X-UI and Marzban panels
@@ -6,26 +6,39 @@ through their APIs and shows them in one clean KHP-style UI (dark navy +
 emerald, mobile-first). It does **not** replace 3X-UI/Marzban; it sits on top
 of them.
 
-## What it does (v1)
+## What it does (v2)
 
 - **Login** — one admin password, set on first run (hashed, salted).
-- **Dashboard** — server cards (sales servers pinned first), green/red status
-  dot from a live reachability check (cached ~60 s), client count, total used
-  GB. FREE badge on the free servers.
+  The header shows the real KHP shield logo.
+- **Dashboard** — servers GROUPED by country (Singapore / Japan / Thailand,
+  collapsible) with emoji flags 🇸🇬🇹🇭🇯🇵, green/red status dot from a live
+  reachability check (cached ~60 s, auto-refresh every 60 s), client count,
+  total used GB, expiring-in-7-days count per server (red), FREE / SALES
+  badges, and a "+ Key" quick button per server. A red alert banner appears
+  when any server is down ("<name> is down — last seen <time>" + Retry),
+  and the "Servers online" stat turns red.
 - **Find a key** — global search across ALL servers at once.
 - **Server page** — every key: GB used / limit with usage bar, expiry date,
-  status (active / expired / disabled / over-limit). Copy link, Delete
-  (with confirm).
+  status (active / expired / disabled / over-limit). Sort chips
+  (Expiry / Usage / Name), filter chips (All / Expiring / High usage),
+  search within the server, 20 keys per page + "Load more".
+  Keys expiring today get a red border.
+- **Key actions** — per key: Copy link, **Renew** (+1/+2/+3 mo — the key is
+  renamed to the new expiry date, GB unchanged), **Swap** (delete + recreate
+  with the same name / expiry / GB but a fresh password), **Disable /
+  Enable**, **Edit GB** (400 / 500 / 1000 / 1500), **Delete**. Destructive
+  actions (Swap, Delete) need a second tap to confirm.
 - **Add Key** — customer name + months (1 / 2 / 3). GB is automatic
   (400 / 1000 / 1500). The key name is made in his convention
   (`Name__D_M_YYYY`, expiry date in the name). After create, the ss:// link
   is shown big with a Copy button. The backend verifies the client exists
   on the panel after creating it.
-- **Expiring soon** — keys expiring in the next 7 days, on the dashboard.
+- **Expiring soon** — keys expiring in the next 7 days, top 5 + "See all"
+  to expand; each row has Renew / Swap / Copy buttons.
 - **Settings → Servers** — add / edit / remove a server (3X-UI or Marzban),
   with a "Test connection" button per server.
 
-Out of scope for v1: VLESS keys, sales reports, Telegram, reminders,
+Out of scope for v2: VLESS keys, sales reports, Telegram, reminders,
 user roles, inbound management, Xray restart, payments.
 
 ## Run (testing)
@@ -65,7 +78,11 @@ admin password on first run. Do not use it in production.
 - **Marzban 0.8.4**: `POST /api/admin/token` (JWT), `/api/users`,
   `POST /api/user`, `PUT /api/user/{username}` (explicit Shadowsocks
   password — auto-generated passwords are NOT applied to the running core),
-  `DELETE /api/user/{username}`.
+  `DELETE /api/user/{username}`. **v2 additions, all verified live:**
+  rename via `PUT {"username": new}` (mirrors `tg_marzban_rename.py`),
+  disable/enable via `PUT {"status": "disabled"|"active"}`,
+  GB change via `PUT {"data_limit": bytes}`, expiry change via
+  `PUT {"expire": unix_seconds}`.
 - **Links**: `ss://base64(method:password)@share_host:port?type=tcp#name`
   for 3X-UI (Marzban has no `?type=`). Only `method:password` is base64'd,
   no `=` padding, host:port in plain text. Share hosts are the in-server
@@ -81,8 +98,8 @@ admin password on first run. Do not use it in production.
 | `app.py` | Flask app: auth, DB, pages, JSON API |
 | `panels.py` | 3X-UI + Marzban clients, link builder, naming/expiry helpers |
 | `templates/` | Jinja pages (base, login, setup, dashboard, server, settings) |
-| `static/` | `style.css`, `app.js` (plain fetch, no framework) |
+| `static/` | `style.css`, `app.js` (plain fetch, no framework), `logo.png` (KHP shield) |
 | `requirements.txt` | Flask, requests, cryptography, gunicorn |
 | `khp-panel.service` | systemd unit (gunicorn) |
 | `Caddyfile` | reverse proxy + auto HTTPS |
-| `TEST-REPORT.md` | end-to-end test results against the real SG-Gift panel |
+| `TEST-REPORT.md` | end-to-end test results (v1 + v2) against the real panels |
