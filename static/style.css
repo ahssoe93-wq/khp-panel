@@ -396,3 +396,63 @@ nav.bottom a.on.nav-settings { background: #f59e0b; color: var(--bg); }
   box-shadow: 0 0 10px rgba(0, 255, 129, 0.18);
 }
 .card.client.expiring-today { border-color: var(--red); }
+
+/* ---- v6 ---- */
+/* login page (approved sample): hero shield + neon card + glowing button */
+.login-page { margin-top: 40px; }
+.login-hero { text-align: center; margin-bottom: 24px; }
+.login-logo {
+  width: 96px; height: 96px; border-radius: 24px;
+  box-shadow: 0 0 28px rgba(0, 255, 129, 0.55);
+}
+.login-title { color: var(--emerald); font-size: 28px; letter-spacing: 1px; margin-top: 14px; line-height: 1.15; }
+.login-sub { color: var(--muted); font-size: 15px; margin-top: 2px; }
+.login-card {
+  border: 2px solid var(--emerald);
+  box-shadow: 0 0 18px rgba(0, 255, 129, 0.25);
+}
+.login-card h2 { font-size: 22px; margin-bottom: 2px; }
+.login-btn { box-shadow: 0 0 16px rgba(0, 255, 129, 0.45); }
+.login-foot { text-align: center; margin-top: 16px; }
+.pw-wrap { position: relative; }
+.pw-wrap input { padding-right: 64px; }
+.pw-toggle {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  background: transparent; border: none; color: var(--emerald);
+  font-size: 13px; font-weight: 800; padding: 6px 8px;
+}
+/* dashboard polish (approved sample): neon stat cards, bigger inputs,
+   country group meta on the right */
+.stat {
+  border: 2px solid var(--emerald);
+  box-shadow: 0 0 14px rgba(0, 255, 129, 0.18);
+}
+.stat b { font-size: 28px; }
+.searchbox input { padding: 14px 16px; }
+.searchbox input:focus {
+  border-color: var(--emerald);
+  box-shadow: 0 0 12px rgba(0, 255, 129, 0.25);
+}
+.group-h .meta { margin-left: auto; text-align: right; }
+.group-h .chev { margin-left: 6px; }
+.group-h .meta .n { font-size: 15px; font-weight: 700; color: var(--emerald); }
+.group-h .meta .s { font-size: 12px; color: var(--muted); }
+.group-h .dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--emerald); box-shadow: 0 0 8px var(--emerald); flex: none;
+}
+/* VLESS section heading on the server page */
+h2.sec-vless { color: #0b1220; background: #38bdf8; }
+/* protocol badge on key cards + search results */
+.badge-vless {
+  background: #38bdf8; color: #0b1220;
+  font-size: 11px; font-weight: 800;
+  border-radius: 12px; padding: 2px 8px;
+  vertical-align: middle; margin-left: 8px;
+}
+.badge-outline {
+  background: var(--emerald); color: var(--bg);
+  font-size: 11px; font-weight: 800;
+  border-radius: 12px; padding: 2px 8px;
+  vertical-align: middle; margin-left: 8px;
+}
