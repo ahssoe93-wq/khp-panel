@@ -12,6 +12,10 @@
   <input id="f-name" placeholder="e.g. PRE8S">
   <label>Country</label>
   <input id="f-country" placeholder="e.g. Singapore">
+  <label>Owner</label>
+  <select id="f-owner">
+    <option value="admin">admin (me)</option>
+  </select>
   <label>Type *</label>
   <select id="f-type">
     <option value="xui">3X-UI</option>
@@ -38,6 +42,35 @@
   <button class="btn ghost" id="cancel-edit" style="display:none;margin-top:8px" onclick="cancelEdit()">Cancel edit</button>
   <p class="muted small" style="margin-top:10px">Passwords are stored encrypted on this panel only.
   Use "Test connection" on a server to check the login works.</p>
+</div>
+
+{# v6: reseller accounts — Super Admin only. A reseller logs in with
+   their own username + password and sees only their own servers. #}
+<h2 class="sec sec-find">Users</h2>
+<div id="users-list"><div class="spin">Loading…</div></div>
+<div class="card">
+  <h3 style="margin-bottom:4px">Add a reseller</h3>
+  <p class="muted small">The reseller's panel header will show their channel name (display name).</p>
+  <div id="user-form-error"></div>
+  <label>Username *</label>
+  <input id="u-name" placeholder="e.g. reseller1" autocomplete="off">
+  <label>Display name (channel name) *</label>
+  <input id="u-display" placeholder="e.g. STH - PREMIUM - KEY" autocomplete="off">
+  <label>Password *</label>
+  <input id="u-pw" type="password" placeholder="At least 6 characters" autocomplete="new-password">
+  <div style="height:16px"></div>
+  <button class="btn block" onclick="addUser()">Add reseller</button>
+</div>
+
+{# v6: bulk server import — paste a JSON array of servers. #}
+<h2 class="sec">Bulk import servers</h2>
+<div class="card">
+  <p class="muted small">Paste a JSON array of servers (same fields as one server above).
+  Duplicates (same panel URL + path) are skipped. Passwords are never shown back.</p>
+  <textarea id="import-json" rows="6" placeholder='[{"name":"EXAMPLE1","country":"TH","type":"xui","base_url":"https://…:2053","panel_path":"/…/","admin_user":"kohein","admin_pw":"…","share_host":"…","share_port":1080,"owner":"reseller1","is_free":0,"is_sales":0}]'></textarea>
+  <div style="height:12px"></div>
+  <button class="btn block" onclick="importServers()">Import servers</button>
+  <div id="import-result" style="margin-top:10px"></div>
 </div>
 {% endblock %}
 {% block scripts %}
