@@ -1,0 +1,5 @@
+# Caddyfile for KHP Panel v1 — reverse proxy + automatic HTTPS.
+# Replace panel.khp25.online with the real domain at deploy time.
+panel.khp25.online {
+    reverse_proxy 127.0.0.1:5000
+}
