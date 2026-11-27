@@ -1,0 +1,6 @@
+# KHP Panel secrets + runtime data — NEVER commit these.
+secret.key
+khp_panel.db
+.venv/
+__pycache__/
+*.pyc
