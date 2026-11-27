@@ -1,0 +1,15 @@
+[Unit]
+Description=KHP Panel v1
+After=network.target
+
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/khp-panel
+Environment="PATH=/opt/khp-panel/.venv/bin"
+ExecStart=/opt/khp-panel/.venv/bin/gunicorn -w 2 -b 127.0.0.1:5000 app:app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
