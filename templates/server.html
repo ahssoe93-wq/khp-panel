@@ -1,11 +1,12 @@
 {% extends "base.html" %}
+{% from "flags.html" import flag %}
 {% set nav='servers' %}
 {% block title %}{{ server.name }} — KHP Panel{% endblock %}
 {% block content %}
 <p><a href="{{ url_for('dashboard') }}">← All servers</a></p>
 <div class="card">
   <div class="row">
-    <div class="flag flag-emoji">{{ {'Singapore': '🇸🇬', 'Thailand': '🇹🇭', 'Japan': '🇯🇵'}.get(server.country, (server.country[:2].upper() if server.country else '??')) }}</div>
+    <div class="flag">{{ flag(server.country) }}</div>
     <div class="grow">
       <h2>{{ server.name }}{% if server.is_free %}<span class="badge-free">FREE</span>{% endif %}{% if server.is_sales %}<span class="badge-sales">SALES</span>{% endif %}</h2>
       <div class="muted small">{{ server.country }} • {{ '3X-UI' if server.type=='xui' else 'Marzban' }} • <span id="srv-status">checking…</span></div>
