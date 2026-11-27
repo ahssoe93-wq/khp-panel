@@ -1,17 +1,37 @@
 {% extends "base.html" %}
-{% block title %}Login — KHP Panel{% endblock %}
+{% block title %}Login — KHP Family Panel{% endblock %}
 {% block content %}
-<div class="center">
-  <div class="card">
-    <h2>Login</h2>
-    <p class="muted">Enter your KHP Panel admin password.</p>
+<div class="center login-page">
+  <div class="login-hero">
+    <img class="login-logo" src="{{ url_for('static', filename='logo.png') }}" alt="KHP">
+    <h1 class="login-title">KHP FAMILY PANEL</h1>
+    <div class="login-sub">Own VPN Panel</div>
+  </div>
+  <div class="card login-card">
+    <h2>Welcome back</h2>
+    <p class="muted">Log in to manage your servers.</p>
     {% if error %}<div class="error">{{ error }}</div>{% endif %}
     <form method="post">
-      <label>Admin password</label>
-      <input type="password" name="password" required autocomplete="current-password" autofocus>
+      <label>Username</label>
+      <input type="text" name="username" required autocomplete="username" placeholder="admin" autofocus>
+      <label>Password</label>
+      <div class="pw-wrap">
+        <input type="password" name="password" id="login-pw" required autocomplete="current-password">
+        <button type="button" class="pw-toggle" onclick="toggleLoginPw(this)">SHOW</button>
+      </div>
       <div style="height:16px"></div>
-      <button class="btn block" type="submit">Login</button>
+      <button class="btn block login-btn" type="submit">Login</button>
     </form>
   </div>
+  <p class="muted small login-foot">One login • Only your servers</p>
 </div>
+{% endblock %}
+{% block scripts %}
+<script>
+function toggleLoginPw(btn) {
+  const pw = document.getElementById('login-pw');
+  if (pw.type === 'password') { pw.type = 'text'; btn.textContent = 'HIDE'; }
+  else { pw.type = 'password'; btn.textContent = 'SHOW'; }
+}
+</script>
 {% endblock %}
