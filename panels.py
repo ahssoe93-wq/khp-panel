@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Panel clients for KHP Panel v1.
+"""Panel clients for KHP Panel v6.
 
 Talks to the user's real servers exactly the way the proven scripts in
 ~/workspace/tools/telegram/ do — same endpoints, same payloads, same
@@ -7,14 +7,20 @@ lessons (see SPEC.md). No guessing: every call here mirrors a working
 script (tg_xui_login.py, tg_xui_key.py, tg_xui_del.py, tg_marzban_login.py,
 tg_marzban_key.py, tg_marzban_list.py, tg_marzban_del.py).
 
-Security: panel passwords are NEVER logged. Full ss:// links are built
-only in memory and returned to the logged-in admin's browser.
+v6: inbounds are detected by PROTOCOL at runtime (never hardcode id 1);
+VLESS (3X-UI only) is managed alongside Outline — one UUID on every
+vless inbound, links built from streamSettings. Marzban VLESS is NOT
+managed (reported only, by the seed probe).
+
+Security: panel passwords are NEVER logged. Full ss:// / vless:// links
+are built only in memory and returned to the logged-in user.
 """
 import base64
 import json
 import secrets
 import string
 import time
+import uuid
 import urllib.parse
 import urllib3
 from datetime import datetime, timedelta, timezone
@@ -152,6 +158,16 @@ def ss_b64(method, password):
     return raw.rstrip("=")
 
 
+def _as_dict(v):
+    """A JSON field that may arrive as a dict or a JSON string."""
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except Exception:
+            return {}
+    return v or {}
+
+
 def client_status(enable, expiry_unix, used, limit):
     """Shared status: active / expired / disabled / over-limit."""
     now = time.time()
@@ -181,6 +197,7 @@ class XuiClient:
         self.share_port = int(share_port)
         self.session = requests.Session()
         self.csrf = None
+        self._inbounds_cache = None  # raw /panel/api/inbounds/list result
 
     def login(self):
         s = self.session
@@ -228,36 +245,87 @@ class XuiClient:
                                      headers=headers, **kwargs)
         return r
 
-    def list_clients(self):
-        """All Outline (inbound 1) clients, normalised.
+    def list_inbounds_raw(self, refresh=False):
+        """Raw inbounds list from the panel (cached per instance; a write
+        invalidates it)."""
+        if self._inbounds_cache is None or refresh:
+            r = self._request("GET", "/panel/api/inbounds/list")
+            data = r.json()
+            self._inbounds_cache = data.get("obj", []) or []
+        return self._inbounds_cache
 
-        Usage = MAX(up+down) across inbounds per client — the same global
-        counter is copied into every inbound, NEVER sum it.
-        """
-        r = self._request("GET", "/panel/api/inbounds/list")
-        data = r.json()
-        inbounds = data.get("obj", [])
-        usage = {}  # email -> max(up+down); also id -> max
-        outline = None
+    def _usage_map(self, inbounds):
+        """email/id -> max(up+down). The same global counter is copied
+        into every inbound, so MAX across inbounds — NEVER sum."""
+        usage = {}
         for inb in inbounds:
             for st in inb.get("clientStats", []) or []:
                 total = (st.get("up") or 0) + (st.get("down") or 0)
                 for key in (st.get("email"), st.get("id")):
                     if key:
                         usage[key] = max(usage.get(key, 0), total)
-            if inb.get("id") == 1:
+        return usage
+
+    def detect_inbounds(self, refresh=False):
+        """Detect inbounds by PROTOCOL at runtime — NEVER assume id 1.
+        (v6 lesson: MK-2's Outline is id 3, STH-th45's is id 4, and MK-1
+        has NO Outline inbound at all.)
+        Returns {"outline": {"id", "port"} | None,
+                 "vless": [{"id", "port", "network", "security", "host",
+                            "path", "server_name", "mode", "fingerprint"}]}.
+        Outline = the first shadowsocks inbound. VLESS = every vless
+        inbound (WS on 443 + XHTTP on 2087 in the studied panels)."""
+        inbounds = self.list_inbounds_raw(refresh=refresh)
+        outline = None
+        vless = []
+        for inb in inbounds:
+            proto = (inb.get("protocol") or "").lower()
+            if proto == "shadowsocks" and outline is None:
+                outline = {"id": inb.get("id"), "port": inb.get("port")}
+            elif proto == "vless":
+                ss = _as_dict(inb.get("streamSettings"))
+                network = (ss.get("network") or "").lower()
+                security = (ss.get("security") or "").lower()
+                tls = _as_dict(ss.get("tlsSettings"))
+                server_name = tls.get("serverName") or ""
+                fingerprint = _as_dict(tls.get("settings")).get("fingerprint") or ""
+                host, path, mode = "", "", None
+                if network == "ws":
+                    ws = _as_dict(ss.get("wsSettings"))
+                    host = ws.get("host") or server_name
+                    path = ws.get("path") or ""
+                elif network == "xhttp":
+                    xh = _as_dict(ss.get("xhttpSettings"))
+                    host = xh.get("host") or server_name
+                    path = xh.get("path") or ""
+                    mode = xh.get("mode") or "auto"
+                vless.append({
+                    "id": inb.get("id"), "port": inb.get("port"),
+                    "network": network, "security": security,
+                    "host": host, "path": path,
+                    "server_name": server_name, "mode": mode,
+                    "fingerprint": fingerprint,
+                })
+        return {"outline": outline, "vless": vless}
+
+    def list_clients(self):
+        """Outline clients, normalised. The Outline inbound is detected
+        by protocol (first shadowsocks inbound) — a server with no
+        Outline inbound (VLESS-only) returns [] instead of raising.
+        Usage = MAX(up+down) across inbounds per client."""
+        inbounds = self.list_inbounds_raw()
+        usage = self._usage_map(inbounds)
+        ol = self.detect_inbounds()["outline"]
+        if ol is None:
+            return []
+        outline = None
+        for inb in inbounds:
+            if inb.get("id") == ol["id"]:
                 outline = inb
+                break
         if outline is None:
-            # fall back to the first shadowsocks inbound
-            for inb in inbounds:
-                if inb.get("protocol") == "shadowsocks":
-                    outline = inb
-                    break
-        if outline is None:
-            raise PanelError("no Outline/shadowsocks inbound found")
-        settings = outline.get("settings", {})
-        if isinstance(settings, str):
-            settings = json.loads(settings)
+            return []
+        settings = _as_dict(outline.get("settings"))
         clients = []
         for c in settings.get("clients", []) or []:
             email = c.get("email", "")
@@ -280,6 +348,311 @@ class XuiClient:
                 "password": c.get("password", ""),
             })
         return clients
+
+    def list_vless_clients(self):
+        """VLESS clients, deduped by UUID across all vless inbounds.
+        One customer key = the SAME UUID client on every vless inbound
+        (identical email/expiry/totalGB) — so the list merges them into
+        one record per UUID. Usage = MAX(up+down) across inbounds, the
+        same rule as Outline (the counter is copied, never summed)."""
+        inbounds = self.list_inbounds_raw()
+        usage = self._usage_map(inbounds)
+        vl = self.detect_inbounds()["vless"]
+        if not vl:
+            return []
+        by_id = {inb.get("id"): inb for inb in inbounds}
+        merged = {}
+        order = []
+        for v in vl:
+            inb = by_id.get(v["id"])
+            if not inb:
+                continue
+            settings = _as_dict(inb.get("settings"))
+            for c in settings.get("clients", []) or []:
+                uid = c.get("id") or ""
+                email = c.get("email", "")
+                if not uid:
+                    continue
+                used = usage.get(email)
+                if used is None:
+                    used = usage.get(uid, 0)
+                total_gb = c.get("totalGB") or 0
+                expiry_ms = c.get("expiryTime") or 0
+                expiry = expiry_ms / 1000 if expiry_ms else 0
+                enable = bool(c.get("enable", True))
+                rec = merged.get(uid)
+                if rec is None:
+                    rec = {
+                        "name": email, "uuid": uid, "protocol": "vless",
+                        "enable": enable, "used": used or 0,
+                        "limit": total_gb, "expiry": expiry,
+                        "status": client_status(enable, expiry,
+                                                used or 0, total_gb),
+                        "inbounds": [v["id"]],
+                    }
+                    merged[uid] = rec
+                    order.append(uid)
+                else:
+                    rec["used"] = max(rec["used"], used or 0)
+                    rec["limit"] = max(rec["limit"], total_gb)
+                    if expiry and (not rec["expiry"]
+                                   or expiry > rec["expiry"]):
+                        rec["expiry"] = expiry
+                    rec["enable"] = rec["enable"] and enable
+                    if v["id"] not in rec["inbounds"]:
+                        rec["inbounds"].append(v["id"])
+                    rec["status"] = client_status(rec["enable"],
+                                                  rec["expiry"],
+                                                  rec["used"], rec["limit"])
+        return [merged[u] for u in order]
+
+    def get_vless_client(self, email):
+        """Merged VLESS record by email, or None."""
+        for c in self.list_vless_clients():
+            if c["name"] == email:
+                return c
+        return None
+
+    def _raw_vless_client(self, email, inbound_id):
+        """The raw VLESS client dict from ONE inbound's settings."""
+        r = self._request("GET", "/panel/api/inbounds/get/%s" % inbound_id)
+        try:
+            obj = r.json().get("obj", {})
+        except Exception:
+            return None
+        settings = _as_dict(obj.get("settings"))
+        for c in settings.get("clients", []) or []:
+            if c.get("email") == email:
+                return dict(c)
+        return None
+
+    def _vless_payload(self, name, new_uuid, total_gb_bytes, expiry_ms):
+        """Client dict for a VLESS add — same UUID everywhere, security
+        auto, limitIp 0 (the shape the studied panels carry)."""
+        return {"email": name, "id": new_uuid, "totalGB": total_gb_bytes,
+                "expiryTime": expiry_ms, "enable": True,
+                "limitIp": 0, "security": "auto"}
+
+    def create_vless_client(self, name, total_gb_bytes, expiry_ms):
+        """Create one UUID on EVERY vless inbound (one add call with all
+        ids, then verify per inbound and add individually to any that
+        missed it). Returns the merged record."""
+        vl = self.detect_inbounds()["vless"]
+        if not vl:
+            raise PanelError("no VLESS inbound on this server")
+        new_uuid = str(uuid.uuid4())
+        payload = {"client": self._vless_payload(name, new_uuid,
+                                                 total_gb_bytes, expiry_ms),
+                   "inboundIds": [v["id"] for v in vl]}
+        r = self._request("POST", "/panel/api/clients/add",
+                          json=payload,
+                          headers={"Content-Type": "application/json"})
+        try:
+            res = r.json()
+        except Exception:
+            raise PanelError("create vless: bad response from panel")
+        if not res.get("success"):
+            raise PanelError("create vless failed: %s"
+                             % res.get("msg", r.text[:200]))
+        self._inbounds_cache = None
+        for v in vl:
+            if self._raw_vless_client(name, v["id"]) is None:
+                r2 = self._request(
+                    "POST", "/panel/api/clients/add",
+                    json={"client": self._vless_payload(
+                        name, new_uuid, total_gb_bytes, expiry_ms),
+                        "inboundIds": [v["id"]]},
+                    headers={"Content-Type": "application/json"})
+                try:
+                    res2 = r2.json()
+                except Exception:
+                    res2 = {}
+                if not res2.get("success"):
+                    raise PanelError("create vless: inbound %s failed: %s"
+                                     % (v["id"], res2.get("msg", "")))
+                self._inbounds_cache = None
+        rec = self.get_vless_client(name)
+        if not rec or rec.get("uuid") != new_uuid:
+            raise PanelError("create vless: client not found on panel "
+                             "after add")
+        return rec
+
+    def update_vless_client(self, old_email, **changes):
+        """Update the client on EVERY vless inbound that has it. Same
+        pattern as update_client: the FULL raw record is sent back, only
+        the changed fields differ — plus the `id` (the UUID) as a STRING.
+        The first parameter is `old_email` (not `email`) so a rename
+        change (email=new_name) lands in **changes instead of colliding
+        with it — the same convention as update_client."""
+        cur = self.get_vless_client(old_email)
+        if not cur:
+            raise PanelError("update vless: client not found: %s" % old_email)
+        for inb_id in cur["inbounds"]:
+            raw = self._raw_vless_client(old_email, inb_id)
+            if not raw:
+                continue
+            if raw.get("id"):
+                raw["id"] = str(raw["id"])
+            raw.update(changes)
+            r = self._request(
+                "POST", "/panel/api/clients/update/" +
+                urllib.parse.quote(old_email),
+                json=raw, headers={"Content-Type": "application/json"})
+            try:
+                res = r.json()
+            except Exception:
+                raise PanelError("update vless: bad response from panel")
+            if not res.get("success"):
+                raise PanelError("update vless failed: %s"
+                                 % res.get("msg", r.text[:200]))
+        self._inbounds_cache = None
+        new_email = changes.get("email", old_email)
+        got = verify_with_retry(lambda: self.get_vless_client(new_email))
+        if not got:
+            raise PanelError("update vless: client not found on panel "
+                             "after update")
+        return got
+
+    def renew_vless_client(self, email, months):
+        """Renew: new expiry = old expiry + 30/60/90 days; the client is
+        RENAMED to the new date (same name convention as Outline) on
+        every vless inbound. GB is unchanged. Returns
+        (new_record, new_name)."""
+        cur = self.get_vless_client(email)
+        if not cur:
+            raise PanelError("renew vless: client not found: %s" % email)
+        _base, old_date = parse_name_date(email)
+        if old_date is None:
+            if not cur.get("expiry"):
+                raise PanelError("renew vless: no expiry date on %s" % email)
+            old_date = (datetime.fromtimestamp(cur["expiry"], MM)
+                        - timedelta(days=1)).date()
+        new_name, new_date = renew_name_and_date(email, old_date, months)
+        new_exp_ms = int((datetime(new_date.year, new_date.month,
+                                   new_date.day, tzinfo=MM)
+                          + timedelta(days=1)).timestamp() * 1000)
+        rec = self.update_vless_client(email, email=new_name,
+                                       expiryTime=new_exp_ms)
+        return rec, new_name
+
+    def swap_vless_client(self, email):
+        """Swap: DELETE the old client first, then create a fresh one
+        with the SAME name / expiry / GB but a NEW UUID (the UUID is the
+        VLESS credential — a new UUID is the fresh password)."""
+        cur = self.get_vless_client(email)
+        if not cur:
+            raise PanelError("swap vless: client not found: %s" % email)
+        was_enabled = bool(cur.get("enable", True))
+        self.delete_vless_client(email)
+        try:
+            rec = self.create_vless_client(
+                email, cur["limit"] or 0,
+                int(cur["expiry"] * 1000) if cur.get("expiry") else 0)
+        except Exception:
+            raise PanelError("swap vless: old key deleted but recreate "
+                             "failed — recreate %s manually on the panel"
+                             % email)
+        if not was_enabled:
+            rec = self.update_vless_client(email, enable=False)
+        return rec
+
+    def toggle_vless_client(self, email, enable):
+        return self.update_vless_client(email, enable=bool(enable))
+
+    def set_gb_vless_client(self, email, total_gb_bytes):
+        return self.update_vless_client(email, totalGB=int(total_gb_bytes))
+
+    def edit_vless_client(self, email, gb_bytes=None, new_date=None):
+        """Edit GB limit and/or expiry date (v3 pattern). A date change
+        RENAMES the key to the new date on every vless inbound.
+        Returns (new_record, new_name)."""
+        cur = self.get_vless_client(email)
+        if not cur:
+            raise PanelError("edit vless: client not found: %s" % email)
+        changes = {}
+        new_name = email
+        if new_date is not None:
+            _base, old_date = parse_name_date(email)
+            if old_date is None:
+                if not cur.get("expiry"):
+                    raise PanelError("edit vless: no expiry date on %s"
+                                     % email)
+                old_date = (datetime.fromtimestamp(cur["expiry"], MM)
+                            - timedelta(days=1)).date()
+            if new_date != old_date:
+                new_name = rename_to_date(email, new_date)
+                changes["email"] = new_name
+                changes["expiryTime"] = xui_expiry_ms(new_date)
+        if gb_bytes is not None:
+            changes["totalGB"] = int(gb_bytes)
+        if not changes:
+            return cur, email
+        rec = self.update_vless_client(email, **changes)
+        return rec, new_name
+
+    def delete_vless_client(self, email):
+        """Delete by email (the panel removes it from every inbound),
+        then verify it is GONE from the merged VLESS list."""
+        r = self._request("POST", "/panel/api/clients/del/" +
+                          urllib.parse.quote(email))
+        try:
+            res = r.json()
+            if not res.get("success"):
+                raise PanelError("delete vless failed: %s"
+                                 % res.get("msg", r.text[:200]))
+        except PanelError:
+            raise
+        except Exception:
+            pass  # some panels return non-JSON; verify below instead
+        self._inbounds_cache = None
+        if verify_with_retry(lambda: self.get_vless_client(email),
+                             expect_present=False) is not None:
+            raise PanelError("delete vless: client still on panel after "
+                             "delete")
+        return True
+
+    def build_vless_links(self, client):
+        """WS link (primary, port 443) + XHTTP link (secondary, port 2087)
+        from the vless inbounds' streamSettings. HOST/SERVERNAME = the
+        panel domain (per the study). Returns {"ws", "xhttp", "primary"}.
+        Other networks get a best-effort generic link under their network
+        name."""
+        vl = self.detect_inbounds()["vless"]
+        if not vl:
+            raise PanelError("no VLESS inbound on this server")
+        uid = client.get("uuid") or ""
+        if not uid:
+            raise PanelError("no UUID on record for this VLESS client")
+        name = urllib.parse.quote(client["name"], safe="")
+        out = {"ws": None, "xhttp": None, "primary": None}
+        for v in vl:
+            net = (v.get("network") or "").lower()
+            host = v.get("host") or v.get("server_name") or ""
+            sni = v.get("server_name") or host
+            path = urllib.parse.quote(v.get("path") or "", safe="/")
+            port = v.get("port") or 443
+            fp = v.get("fingerprint") or "chrome"
+            sec = v.get("security") or "tls"
+            if net == "ws":
+                out["ws"] = (
+                    "vless://%s@%s:%d?encryption=none&security=%s&sni=%s"
+                    "&type=ws&host=%s&path=%s&fp=%s#%s"
+                    % (uid, host, port, sec, sni, host, path, fp, name))
+            elif net == "xhttp":
+                mode = v.get("mode") or "auto"
+                out["xhttp"] = (
+                    "vless://%s@%s:%d?encryption=none&security=%s&sni=%s"
+                    "&type=xhttp&mode=%s&host=%s&path=%s&fp=%s#%s"
+                    % (uid, host, port, sec, sni, mode, host, path, fp,
+                       name))
+            else:
+                out[net] = (
+                    "vless://%s@%s:%d?encryption=none&security=%s&sni=%s"
+                    "&type=%s&host=%s&fp=%s#%s"
+                    % (uid, host, port, sec, sni, net, host, fp, name))
+        out["primary"] = out.get("ws") or out.get("xhttp") or next(
+            (l for k, l in out.items() if k != "primary" and l), None)
+        return out
 
     def get_client(self, email):
         """True record incl. usedTraffic, or None if not found."""
@@ -314,10 +687,14 @@ class XuiClient:
         }
 
     def create_client(self, name, total_gb_bytes, expiry_ms):
-        """Create on inbound 1, then GET it back to read the password."""
+        """Create on the detected Outline inbound, then GET it back to
+        read the password."""
+        ol = self.detect_inbounds()["outline"]
+        if ol is None:
+            raise PanelError("no Outline/shadowsocks inbound on this server")
         payload = {"client": {"email": name, "totalGB": total_gb_bytes,
                               "expiryTime": expiry_ms, "enable": True},
-                   "inboundIds": [1]}
+                   "inboundIds": [ol["id"]]}
         r = self._request("POST", "/panel/api/clients/add",
                           json=payload,
                           headers={"Content-Type": "application/json"})
@@ -327,12 +704,12 @@ class XuiClient:
             raise PanelError("create: bad response from panel")
         if not res.get("success"):
             raise PanelError("create failed: %s" % res.get("msg", r.text[:200]))
-        # verify: read the client back from inbound 1 (password is generated)
-        r = self._request("GET", "/panel/api/inbounds/get/1")
+        self._inbounds_cache = None
+        # verify: read the client back from the Outline inbound
+        # (password is generated by the panel)
+        r = self._request("GET", "/panel/api/inbounds/get/%s" % ol["id"])
         obj = r.json().get("obj", {})
-        settings = obj.get("settings", {})
-        if isinstance(settings, str):
-            settings = json.loads(settings)
+        settings = _as_dict(obj.get("settings"))
         for c in settings.get("clients", []) or []:
             if c.get("email") == name:
                 expiry_ms2 = c.get("expiryTime") or 0
@@ -349,17 +726,18 @@ class XuiClient:
         raise PanelError("create: client not found on panel after add")
 
     def _raw_client(self, email):
-        """The raw client dict straight from inbound 1 settings (keeps
-        id, flow, limitIp, tgId, subId, comment, reset — everything the
-        update endpoint expects back), or None."""
-        r = self._request("GET", "/panel/api/inbounds/get/1")
+        """The raw client dict straight from the Outline inbound settings
+        (keeps id, flow, limitIp, tgId, subId, comment, reset — everything
+        the update endpoint expects back), or None."""
+        ol = self.detect_inbounds()["outline"]
+        if ol is None:
+            return None
+        r = self._request("GET", "/panel/api/inbounds/get/%s" % ol["id"])
         try:
             obj = r.json().get("obj", {})
         except Exception:
             return None
-        settings = obj.get("settings", {})
-        if isinstance(settings, str):
-            settings = json.loads(settings)
+        settings = _as_dict(obj.get("settings"))
         for c in settings.get("clients", []) or []:
             if c.get("email") == email:
                 return dict(c)
@@ -400,6 +778,7 @@ class XuiClient:
             raise PanelError("update: bad response from panel")
         if not res.get("success"):
             raise PanelError("update failed: %s" % res.get("msg", r.text[:200]))
+        self._inbounds_cache = None
         new_email = changes.get("email", old_email)
         got = verify_with_retry(lambda: self.get_client(new_email))
         if not got:
@@ -492,6 +871,7 @@ class XuiClient:
             raise
         except Exception:
             pass  # some panels return non-JSON; verify below instead
+        self._inbounds_cache = None
         if verify_with_retry(lambda: self.get_client(email),
                              expect_present=False) is not None:
             raise PanelError("delete: client still on panel after delete")
@@ -508,11 +888,15 @@ class XuiClient:
 
     def health(self):
         """Login + list. Returns (online, client_count, used_total_bytes,
-        limit_total_bytes) — the limit total feeds the dashboard usage bar."""
+        limit_total_bytes) — the limit total feeds the dashboard usage bar.
+        Counts Outline + VLESS keys (VLESS deduped by UUID)."""
         clients = self.list_clients()
-        used = sum(c["used"] for c in clients)
-        limit = sum(c["limit"] or 0 for c in clients)
-        return True, len(clients), used, limit
+        vless = self.list_vless_clients()
+        used = (sum(c["used"] for c in clients)
+                + sum(c["used"] for c in vless))
+        limit = (sum(c["limit"] or 0 for c in clients)
+                 + sum(c["limit"] or 0 for c in vless))
+        return True, len(clients) + len(vless), used, limit
 
 
 # ---------------------------------------------------------------- Marzban
@@ -788,6 +1172,17 @@ class MarzbanClient:
         frag = urllib.parse.quote(user["name"], safe="")
         return "ss://%s@%s:%d#%s" % (
             ss_b64(method, password), self.share_host, self.share_port, frag)
+
+    def list_inbounds(self):
+        """Raw inbounds (for the seed probe: REPORT any VLESS inbound
+        found — Marzban VLESS is out of scope, never managed). Returns
+        the parsed JSON (list or dict, depending on the Marzban version)
+        or None."""
+        r = self._request("GET", "/api/inbounds")
+        try:
+            return r.json()
+        except Exception:
+            return None
 
     def health(self):
         users = self.list_users()
