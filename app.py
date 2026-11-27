@@ -19,6 +19,7 @@ import os
 import secrets
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from flask import (Flask, abort, g, jsonify, redirect, render_template,
@@ -92,6 +93,14 @@ def init_db():
                       is_sales INTEGER NOT NULL DEFAULT 0,
                       sort_order INTEGER NOT NULL DEFAULT 0,
                       created_at INTEGER NOT NULL)""")
+    # v4: keys created through THIS panel, so the server page can sort
+    # "Newest" first and show a NEW badge. Keys created elsewhere (or
+    # before v4) have no row here and sort after, by expiry.
+    db.execute("""CREATE TABLE IF NOT EXISTS panel_keys (
+                      server_id INTEGER NOT NULL,
+                      name TEXT NOT NULL,
+                      created_at INTEGER NOT NULL,
+                      PRIMARY KEY (server_id, name))""")
     db.commit()
     db.close()
 
@@ -111,6 +120,50 @@ def meta_set(key, value):
                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                (key, value))
     db.commit()
+
+
+# ---------------------------------------------------------------- panel_keys (v4)
+def note_key_created(server_id, name, created_at=None):
+    db = get_db()
+    db.execute("INSERT INTO panel_keys(server_id, name, created_at) "
+               "VALUES(?, ?, ?) ON CONFLICT(server_id, name) "
+               "DO UPDATE SET created_at=excluded.created_at",
+               (server_id, name, int(created_at or time.time())))
+    db.commit()
+
+
+def note_key_deleted(server_id, name):
+    db = get_db()
+    db.execute("DELETE FROM panel_keys WHERE server_id=? AND name=?",
+               (server_id, name))
+    db.commit()
+
+
+def note_key_renamed(server_id, old_name, new_name):
+    """Keep the original created_at when a key is renamed (renew / edit)."""
+    db = get_db()
+    row = db.execute("SELECT created_at FROM panel_keys "
+                     "WHERE server_id=? AND name=?",
+                     (server_id, old_name)).fetchone()
+    if row:
+        db.execute("DELETE FROM panel_keys WHERE server_id=? AND name=?",
+                   (server_id, old_name))
+        # v4: upsert — the target name may already have a row (a previous
+        # key with the same name, or a direct panel delete that bypassed
+        # note_key_deleted); a plain INSERT would 500 the request even
+        # though the panel rename already succeeded.
+        db.execute("INSERT INTO panel_keys(server_id, name, created_at) "
+                   "VALUES(?, ?, ?) ON CONFLICT(server_id, name) "
+                   "DO UPDATE SET created_at=excluded.created_at",
+                   (server_id, new_name, row[0]))
+        db.commit()
+
+
+def created_map(server_id):
+    """name -> created_at (unix) for keys this panel created."""
+    rows = get_db().execute("SELECT name, created_at FROM panel_keys "
+                            "WHERE server_id=?", (server_id,)).fetchall()
+    return {r["name"]: r["created_at"] for r in rows}
 
 
 def admin_hash(password, salt=None):
@@ -293,7 +346,7 @@ def server_clients(server):
     return client.list_users()
 
 
-def public_client(server_id, c):
+def public_client(server_id, c, created=None):
     """Client dict safe for JSON (no password, no raw link unless asked)."""
     return {
         "name": c["name"],
@@ -309,6 +362,9 @@ def public_client(server_id, c):
                      if c.get("expiry") else "never"),
         "pct": (min(100, int(c["used"] * 100 / c["limit"]))
                 if c.get("limit") else 0),
+        # v4: unix time this panel created the key (0 = created elsewhere
+        # or before v4); drives the "Newest" sort and the NEW badge.
+        "created_at": created or 0,
     }
 
 
@@ -322,12 +378,17 @@ def api_servers():
 @app.route("/api/health")
 @login_required
 def api_health():
+    # v4: check the 12 servers in PARALLEL, not one by one — a cold
+    # check used to take the sum of 12 panel round-trips. The full
+    # server rows are read in this thread first (get_db needs the Flask
+    # request context); only the network checks run in the pool.
     force = request.args.get("force") == "1"
+    servers = [get_server(s["id"]) for s in list_servers()]
     out = []
-    for s in list_servers():
-        full = get_server(s["id"])
-        h = server_health(full, force=force)
-        out.append({"id": s["id"], "name": s["name"], **h})
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for full, h in zip(servers, pool.map(
+                lambda s: server_health(s, force=force), servers)):
+            out.append({"id": full["id"], "name": full["name"], **h})
     return jsonify({"ok": True, "health": out,
                     "checked_at": int(time.time())})
 
@@ -342,8 +403,11 @@ def api_clients(server_id):
         clients = server_clients(server)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"ok": False, "error": str(exc)[:300]}), 502
+    created = created_map(server_id)
     return jsonify({"ok": True, "server": server["name"],
-                    "clients": [public_client(server_id, c) for c in clients]})
+                    "clients": [public_client(server_id, c,
+                                              created.get(c["name"]))
+                                for c in clients]})
 
 
 @app.route("/api/server/<int:server_id>/link/<path:name>")
@@ -373,23 +437,50 @@ def api_add_key(server_id):
     if not server:
         return jsonify({"ok": False, "error": "server not found"}), 404
     data = request.get_json(force=True, silent=True) or {}
+    # v4: optional custom GB and custom expiry date override the preset.
+    custom_gb = None
+    if data.get("gb") is not None:
+        try:
+            custom_gb = float(data.get("gb"))
+        except (TypeError, ValueError):
+            custom_gb = 0
+        if not custom_gb or custom_gb <= 0 or custom_gb > 100000:
+            return jsonify({"ok": False,
+                            "error": "gb must be a positive number"}), 400
+    custom_date = None
+    if data.get("expiry_date"):
+        try:
+            custom_date = datetime.strptime(
+                str(data["expiry_date"]).strip(), "%Y-%m-%d").date()
+        except ValueError:
+            return jsonify({"ok": False,
+                            "error": "expiry_date must be YYYY-MM-DD"}), 400
     months = int(data.get("months") or 1)
     if months not in MONTHS_GB:
         return jsonify({"ok": False, "error": "months must be 1, 2 or 3"}), 400
-    gb = MONTHS_GB[months]
-    total_bytes = GB_BYTES[gb]
+    gb = custom_gb if custom_gb is not None else MONTHS_GB[months]
+    total_bytes = (GB_BYTES[int(gb)] if float(gb).is_integer()
+                   and int(gb) in GB_BYTES else int(gb * 1073741824))
     # explicit full name override (testing / advanced); otherwise build from
     # the customer name + the expiry date in his convention.
     full_name = (data.get("client_name") or "").strip()
     if full_name:
         name = full_name
-        exp_date, _suffix = expiry_for(months)
+        if custom_date:
+            exp_date = custom_date
+        else:
+            exp_date, _suffix = expiry_for(months)
     else:
         raw = (data.get("name") or "").strip()
         raw = "".join(ch for ch in raw if ch.isalnum() or ch in "_-")
         if not raw:
             return jsonify({"ok": False, "error": "customer name needed"}), 400
-        exp_date, suffix = expiry_for(months)
+        if custom_date:
+            exp_date = custom_date
+            suffix = "%d_%d_%d" % (exp_date.day, exp_date.month,
+                                   exp_date.year)
+        else:
+            exp_date, suffix = expiry_for(months)
         name = "%s__%s" % (raw, suffix)
     try:
         client = make_client(server)
@@ -397,16 +488,31 @@ def api_add_key(server_id):
             exp_ms = int((datetime(exp_date.year, exp_date.month, exp_date.day,
                                    tzinfo=MM) + timedelta(days=1)).timestamp() * 1000)
             created = client.create_client(name, total_bytes, exp_ms)
+            exp_ts = exp_ms // 1000
         else:
             exp_s = int(datetime(exp_date.year, exp_date.month, exp_date.day,
                                  23, 59, tzinfo=MM).timestamp())
             created = client.create_user(name, total_bytes, exp_s)
+            exp_ts = exp_s
         link = client.build_link(created)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"ok": False, "error": str(exc)[:300]}), 502
+    note_key_created(server_id, name)
+    HEALTH_CACHE.pop(server_id, None)
+    gb_disp = str(int(gb)) if float(gb).is_integer() else str(gb)
+    if custom_gb is not None or custom_date is not None:
+        summary = "%s GB • exp %s" % (gb_disp, exp_date.isoformat())
+    else:
+        summary = "%d mo • %s GB • exp %s" % (months, gb_disp,
+                                              exp_date.isoformat())
     return jsonify({"ok": True, "name": name, "link": link,
-                    "expiry": exp_date.isoformat(), "gb": gb,
-                    "months": months})
+                    "expiry": exp_date.isoformat(), "expiry_ts": exp_ts,
+                    "expiry_h": exp_date.strftime("%d %b %Y"),
+                    "gb": gb, "months": months,
+                    "limit": total_bytes, "created_at": int(time.time()),
+                    "custom": bool(custom_gb is not None
+                                  or custom_date is not None),
+                    "summary": summary})
 
 
 @app.route("/api/server/<int:server_id>/delete-key", methods=["POST"])
@@ -427,6 +533,7 @@ def api_delete_key(server_id):
             client.delete_user(name)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"ok": False, "error": str(exc)[:300]}), 502
+    note_key_deleted(server_id, name)
     HEALTH_CACHE.pop(server_id, None)
     return jsonify({"ok": True, "name": name, "gone": True})
 
@@ -462,6 +569,8 @@ def api_renew_key(server_id, name):
         link = client.build_link(rec)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"ok": False, "error": str(exc)[:300]}), 502
+    if new_name != name:
+        note_key_renamed(server_id, name, new_name)
     HEALTH_CACHE.pop(server_id, None)
     return jsonify({"ok": True, "old_name": name, "name": new_name,
                     "link": link,
@@ -492,9 +601,13 @@ def api_swap_key(server_id, name):
         link = client.build_link(rec)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"ok": False, "error": str(exc)[:300]}), 502
+    # Swap = delete + fresh create, so it is a NEW key: fresh created_at.
+    note_key_created(server_id, name)
     HEALTH_CACHE.pop(server_id, None)
     return jsonify({"ok": True, "name": name, "link": link,
-                    "expiry": rec.get("expiry") or 0})
+                    "expiry": rec.get("expiry") or 0,
+                    "limit": rec.get("limit") or 0,
+                    "created_at": int(time.time())})
 
 
 @app.route("/api/server/<int:server_id>/clients/<path:name>/toggle",
@@ -591,6 +704,8 @@ def api_edit_key(server_id, name):
         link = client.build_link(rec)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"ok": False, "error": str(exc)[:300]}), 502
+    if new_name != name:
+        note_key_renamed(server_id, name, new_name)
     HEALTH_CACHE.pop(server_id, None)
     return jsonify({"ok": True, "old_name": name, "name": new_name,
                     "link": link,
@@ -614,9 +729,10 @@ def api_search():
             clients = server_clients(full)
         except Exception:  # noqa: BLE001 - one down server must not break search
             continue
+        created = created_map(s["id"])
         for c in clients:
             if q in c["name"].lower():
-                pc = public_client(s["id"], c)
+                pc = public_client(s["id"], c, created.get(c["name"]))
                 pc["server_name"] = s["name"]
                 pc["server_type"] = s["type"]
                 results.append(pc)
@@ -637,10 +753,11 @@ def api_expiring():
             clients = server_clients(full)
         except Exception:  # noqa: BLE001
             continue
+        created = created_map(s["id"])
         for c in clients:
             exp = c.get("expiry") or 0
             if exp and now <= exp <= soon:
-                pc = public_client(s["id"], c)
+                pc = public_client(s["id"], c, created.get(c["name"]))
                 pc["server_name"] = s["name"]
                 pc["days_left"] = max(0, int((exp - now) // 86400))
                 results.append(pc)
