@@ -31,8 +31,11 @@ apt-get update -qq
 apt-get install -y -qq caddy > /dev/null
 
 # Panel code
+# NOTE: /opt/khp-panel ends up owned by www-data (the service user, see the
+# chown below), so root's git refuses to work in it ("fatal: detected dubious
+# ownership") unless the directory is marked safe for this command.
 if [ -d /opt/khp-panel/.git ]; then
-  git -C /opt/khp-panel pull --ff-only
+  git -c safe.directory=/opt/khp-panel -C /opt/khp-panel pull --ff-only
 else
   rm -rf /opt/khp-panel
   git clone "$REPO_URL" /opt/khp-panel
