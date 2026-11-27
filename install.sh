@@ -40,7 +40,19 @@ fi
 cd /opt/khp-panel
 # Clean slate for re-runs: a failed earlier run leaves a broken half-made venv.
 rm -rf .venv
-python3 -m venv .venv
+# Pick a Python with a working venv: prefer the stock Ubuntu 20.04 python3.8
+# (its venv module comes with the python3-venv package installed above);
+# otherwise use the default python3.
+if command -v python3.8 >/dev/null 2>&1; then PYBIN=python3.8; else PYBIN=python3; fi
+# Normal venv first; if ensurepip is missing (custom-built python3.9), retry
+# without pip and fetch pip directly from bootstrap.pypa.io instead.
+if ! "$PYBIN" -m venv .venv >/dev/null 2>&1; then
+  echo "venv with pip failed (ensurepip missing) — retrying without pip..."
+  rm -rf .venv
+  "$PYBIN" -m venv --without-pip .venv
+  curl -sS https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
+  .venv/bin/python /tmp/get-pip.py --quiet
+fi
 .venv/bin/pip install -q -r requirements.txt
 # The service runs as www-data, so it must own the app dir (it writes the
 # SQLite DB + secret.key there at runtime).
