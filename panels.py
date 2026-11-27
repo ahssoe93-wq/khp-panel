@@ -100,6 +100,25 @@ def renew_name_and_date(name, old_date, months):
     return new_name, new_date
 
 
+def rename_to_date(name, new_date):
+    """New name encoding new_date in the Name__D_M_YYYY convention."""
+    base, _ = parse_name_date(name)
+    return "%s__%d_%d_%d" % (base, new_date.day, new_date.month,
+                             new_date.year)
+
+
+def xui_expiry_ms(new_date):
+    """3X-UI expiryTime for a named date: +1 day 00:00 Myanmar, ms."""
+    return int((datetime(new_date.year, new_date.month, new_date.day,
+                         tzinfo=MM) + timedelta(days=1)).timestamp() * 1000)
+
+
+def marzban_expiry_s(new_date):
+    """Marzban expire for a named date: 23:59 Myanmar, unix seconds."""
+    return int(datetime(new_date.year, new_date.month, new_date.day,
+                       23, 59, tzinfo=MM).timestamp())
+
+
 def expiry_for(months, today=None):
     """Return (expiry_date, name_suffix) for a key bought today.
 
@@ -434,6 +453,34 @@ class XuiClient:
     def set_gb_client(self, email, total_gb_bytes):
         return self.update_client(email, totalGB=int(total_gb_bytes))
 
+    def edit_client(self, email, gb_bytes=None, new_date=None):
+        """Edit GB limit and/or expiry date (v3). A date change RENAMES
+        the key to the new date (the name encodes the expiry) in the SAME
+        update call as the expiry move; a GB-only change does not rename.
+        Returns (new_record, new_name)."""
+        cur = self.get_client(email)
+        if not cur:
+            raise PanelError("edit: client not found: %s" % email)
+        changes = {}
+        new_name = email
+        if new_date is not None:
+            _base, old_date = parse_name_date(email)
+            if old_date is None:
+                if not cur.get("expiry"):
+                    raise PanelError("edit: no expiry date on %s" % email)
+                old_date = (datetime.fromtimestamp(cur["expiry"], MM)
+                            - timedelta(days=1)).date()
+            if new_date != old_date:
+                new_name = rename_to_date(email, new_date)
+                changes["email"] = new_name
+                changes["expiryTime"] = xui_expiry_ms(new_date)
+        if gb_bytes is not None:
+            changes["totalGB"] = int(gb_bytes)
+        if not changes:
+            return cur, email
+        rec = self.update_client(email, **changes)
+        return rec, new_name
+
     def delete_client(self, email):
         r = self._request("POST", "/panel/api/clients/del/" +
                           urllib.parse.quote(email))
@@ -460,10 +507,12 @@ class XuiClient:
             ss_b64(method, password), self.share_host, self.share_port, frag)
 
     def health(self):
-        """Login + list. Returns (online, client_count, used_total_bytes)."""
+        """Login + list. Returns (online, client_count, used_total_bytes,
+        limit_total_bytes) — the limit total feeds the dashboard usage bar."""
         clients = self.list_clients()
         used = sum(c["used"] for c in clients)
-        return True, len(clients), used
+        limit = sum(c["limit"] or 0 for c in clients)
+        return True, len(clients), used, limit
 
 
 # ---------------------------------------------------------------- Marzban
@@ -681,6 +730,44 @@ class MarzbanClient:
     def set_gb_user(self, username, total_gb_bytes):
         return self.update_user(username, data_limit=int(total_gb_bytes))
 
+    def edit_user(self, username, gb_bytes=None, new_date=None):
+        """Edit GB limit and/or expiry date (v3). A date change RENAMES
+        the user — Marzban PUT ignores username, so rename = DELETE +
+        RECREATE with the new name (same pattern as renew_user; the fresh
+        user starts with used=0). A GB-only change is a plain PUT and
+        keeps the name, password and used traffic. Returns
+        (new_record, new_name)."""
+        cur = self.get_user(username)
+        if not cur:
+            raise PanelError("edit: user not found: %s" % username)
+        new_name = username
+        if new_date is not None:
+            _base, old_date = parse_name_date(username)
+            if old_date is None:
+                if not cur.get("expiry"):
+                    raise PanelError("edit: no expiry date on %s" % username)
+                old_date = datetime.fromtimestamp(cur["expiry"], MM).date()
+            if new_date != old_date:
+                new_name = rename_to_date(username, new_date)
+        if new_name != username:
+            new_exp = marzban_expiry_s(new_date)
+            new_limit = (int(gb_bytes) if gb_bytes is not None
+                         else (cur["limit"] or 0))
+            was_enabled = bool(cur.get("enable", True))
+            self.delete_user(username)
+            try:
+                rec = self.create_user(new_name, new_limit, new_exp)
+            except Exception:
+                raise PanelError("edit: old key deleted but recreate failed — "
+                                 "recreate %s manually on the panel" % new_name)
+            if not was_enabled:
+                rec = self.update_user(new_name, status="disabled")
+            return rec, new_name
+        if gb_bytes is not None:
+            rec = self.update_user(username, data_limit=int(gb_bytes))
+            return rec, username
+        return cur, username
+
     def delete_user(self, username):
         r = self._request("DELETE", "/api/user/" + urllib.parse.quote(username))
         if r.status_code == 404:
@@ -705,7 +792,8 @@ class MarzbanClient:
     def health(self):
         users = self.list_users()
         used = sum(u["used"] for u in users)
-        return True, len(users), used
+        limit = sum(u["limit"] or 0 for u in users)
+        return True, len(users), used, limit
 
 
 def make_client(server):
