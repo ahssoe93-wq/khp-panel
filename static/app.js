@@ -487,8 +487,25 @@ async function loadServerPage() {
   }
   await healthP;
 }
+function nameFromPastedKey(text) {
+  // A pasted ss:// link -> the key name from its #fragment, or null.
+  // Handles this panel's `#<name>` and the 3X-UI panel's
+  // `#Outline-<name>-<GB>GB...` style. Lets the server-page filter find
+  // a key from a pasted link, just like the dashboard search does.
+  const s = (text || '').trim();
+  if (s.toLowerCase().indexOf('ss://') === -1) return null;
+  const hash = s.indexOf('#');
+  if (hash === -1) return null;
+  let frag = s.slice(hash + 1).trim();
+  if (!frag) return null;
+  try { frag = decodeURIComponent(frag); } catch (e) { /* keep raw */ }
+  const m = frag.match(/^Outline-(.+)-\d+GB/);
+  return m ? m[1] : frag;
+}
 function filteredClients() {
-  const f = (document.getElementById('client-filter').value || '').toLowerCase();
+  const raw = document.getElementById('client-filter').value || '';
+  const pasted = nameFromPastedKey(raw);
+  const f = (pasted !== null ? pasted : raw).toLowerCase();
   const now = Date.now() / 1000;
   let list = ALL_CLIENTS.filter(c => c.name.toLowerCase().includes(f));
   if (FILTER_BY === 'expiring')
