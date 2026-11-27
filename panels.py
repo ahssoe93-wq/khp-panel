@@ -48,6 +48,58 @@ def add_months(date, months):
     return date.replace(year=year, month=month, day=day)
 
 
+import re as _re
+
+_NAME_DATE_RE = _re.compile(r"^(.*?)__(\d{1,2})[_-](\d{1,2})[_-](\d{4})$")
+
+RENEW_DAYS = {1: 30, 2: 60, 3: 90}
+
+
+def verify_with_retry(get_fn, expect_present=True, tries=3, delay=1):
+    """Read a client/user back after a write. The panels can answer a
+    read a beat behind a write (the 2026-11-27 v2 test saw renew report
+    502 even though the rename had persisted), so retry briefly before
+    concluding the record is missing / still there. Returns the record
+    (or None) from the last attempt."""
+    got = None
+    for _ in range(tries):
+        got = get_fn()
+        if bool(got) == expect_present:
+            return got
+        time.sleep(delay)
+    return got
+
+
+def parse_name_date(name):
+    """Split a client name into (base, expiry_date).
+
+    The name convention is Name__D_M_YYYY (double underscore, no
+    zero-padding); older names sometimes use dashes in the date part.
+    Returns (base, date) or (name, None) when no date suffix parses.
+    """
+    m = _NAME_DATE_RE.match(name or "")
+    if not m:
+        return name, None
+    try:
+        d = datetime(int(m.group(4)), int(m.group(3)), int(m.group(2))).date()
+    except ValueError:
+        return name, None
+    return m.group(1), d
+
+
+def renew_name_and_date(name, old_date, months):
+    """Renew maths: new date = old date + 30/60/90 days; the new name
+    encodes the new date in the same Name__D_M_YYYY form. GB is unchanged
+    on renew — only the name and the expiry move."""
+    if months not in RENEW_DAYS:
+        raise PanelError("months must be 1, 2 or 3")
+    new_date = old_date + timedelta(days=RENEW_DAYS[months])
+    base, _ = parse_name_date(name)
+    new_name = "%s__%d_%d_%d" % (base, new_date.day, new_date.month,
+                                 new_date.year)
+    return new_name, new_date
+
+
 def expiry_for(months, today=None):
     """Return (expiry_date, name_suffix) for a key bought today.
 
@@ -277,6 +329,111 @@ class XuiClient:
                 }
         raise PanelError("create: client not found on panel after add")
 
+    def _raw_client(self, email):
+        """The raw client dict straight from inbound 1 settings (keeps
+        id, flow, limitIp, tgId, subId, comment, reset — everything the
+        update endpoint expects back), or None."""
+        r = self._request("GET", "/panel/api/inbounds/get/1")
+        try:
+            obj = r.json().get("obj", {})
+        except Exception:
+            return None
+        settings = obj.get("settings", {})
+        if isinstance(settings, str):
+            settings = json.loads(settings)
+        for c in settings.get("clients", []) or []:
+            if c.get("email") == email:
+                return dict(c)
+        return None
+
+    def _client_id(self, email):
+        """The client's numeric id, from /panel/api/clients/get (the
+        inbound settings records carry NO id). Returns str(id) or None."""
+        r = self._request("GET", "/panel/api/clients/get/" +
+                          urllib.parse.quote(email))
+        try:
+            obj = r.json().get("obj") or {}
+            cid = (obj.get("client") or {}).get("id")
+        except Exception:
+            cid = None
+        return str(cid) if cid is not None else None
+
+    def update_client(self, old_email, **changes):
+        """Update one client with the bare client object. Mirrors
+        tg_xui_rename.py: the FULL raw record from inbound settings is
+        sent back, only the changed fields differ — plus the `id`, which
+        the settings record does NOT carry, so it is read from
+        /panel/api/clients/get and sent as a STRING (a number fails)."""
+        raw = self._raw_client(old_email)
+        if not raw:
+            raise PanelError("update: client not found: %s" % old_email)
+        cid = self._client_id(old_email)
+        if cid is not None:
+            raw["id"] = cid
+        raw.update(changes)
+        r = self._request("POST", "/panel/api/clients/update/" +
+                          urllib.parse.quote(old_email),
+                          json=raw,
+                          headers={"Content-Type": "application/json"})
+        try:
+            res = r.json()
+        except Exception:
+            raise PanelError("update: bad response from panel")
+        if not res.get("success"):
+            raise PanelError("update failed: %s" % res.get("msg", r.text[:200]))
+        new_email = changes.get("email", old_email)
+        got = verify_with_retry(lambda: self.get_client(new_email))
+        if not got:
+            raise PanelError("update: client not found on panel after update")
+        return got
+
+    def renew_client(self, email, months):
+        """Renew: new expiry = old expiry + 30/60/90 days; the client is
+        RENAMED to the new date (the name encodes the expiry) and the
+        expiryTime moves in the same update call. GB is unchanged.
+        Returns (new_record, new_name)."""
+        cur = self.get_client(email)
+        if not cur:
+            raise PanelError("renew: client not found: %s" % email)
+        _base, old_date = parse_name_date(email)
+        if old_date is None:
+            # fall back to the stored expiryTime (named date + 1 day 00:00 MM)
+            if not cur.get("expiry"):
+                raise PanelError("renew: no expiry date on %s" % email)
+            old_date = (datetime.fromtimestamp(cur["expiry"], MM)
+                        - timedelta(days=1)).date()
+        new_name, new_date = renew_name_and_date(email, old_date, months)
+        new_exp_ms = int((datetime(new_date.year, new_date.month,
+                                   new_date.day, tzinfo=MM)
+                          + timedelta(days=1)).timestamp() * 1000)
+        rec = self.update_client(email, email=new_name, expiryTime=new_exp_ms)
+        return rec, new_name
+
+    def swap_client(self, email):
+        """Swap: DELETE the old client first, then create a fresh one with
+        the SAME name / expiry / GB but a fresh panel-generated password.
+        Used when a key does not connect. Returns the new record."""
+        cur = self.get_client(email)
+        if not cur:
+            raise PanelError("swap: client not found: %s" % email)
+        was_enabled = bool(cur.get("enable", True))
+        self.delete_client(email)
+        try:
+            rec = self.create_client(email, cur["limit"] or 0,
+                                     int(cur["expiry"] * 1000) if cur.get("expiry") else 0)
+        except Exception:
+            raise PanelError("swap: old key deleted but recreate failed — "
+                             "recreate %s manually on the panel" % email)
+        if not was_enabled:
+            rec = self.update_client(email, enable=False)
+        return rec
+
+    def toggle_client(self, email, enable):
+        return self.update_client(email, enable=bool(enable))
+
+    def set_gb_client(self, email, total_gb_bytes):
+        return self.update_client(email, totalGB=int(total_gb_bytes))
+
     def delete_client(self, email):
         r = self._request("POST", "/panel/api/clients/del/" +
                           urllib.parse.quote(email))
@@ -288,7 +445,8 @@ class XuiClient:
             raise
         except Exception:
             pass  # some panels return non-JSON; verify below instead
-        if self.get_client(email) is not None:
+        if verify_with_retry(lambda: self.get_client(email),
+                             expect_present=False) is not None:
             raise PanelError("delete: client still on panel after delete")
         return True
 
@@ -447,13 +605,90 @@ class MarzbanClient:
             raise PanelError("create: user not found on panel after add")
         return got
 
+    def update_user(self, old_username, **fields):
+        """Partial update via PUT /api/user/{old_username} (mirrors the
+        password-PUT in create_user). Accepts username (rename), expire,
+        data_limit, status, proxies. Returns the verified record.
+        NOTE: the first parameter is named old_username (not username)
+        because renew passes username=<new name> as a field — passing
+        both positionally and as a keyword raises TypeError."""
+        r = self._request("PUT", "/api/user/" + urllib.parse.quote(old_username),
+                          json=fields)
+        if r.status_code >= 400:
+            raise PanelError("update failed: %s" % r.text[:200])
+        new_name = fields.get("username", old_username)
+        got = verify_with_retry(lambda: self.get_user(new_name))
+        if not got:
+            raise PanelError("update: user not found on panel after update")
+        return got
+
+    def renew_user(self, username, months):
+        """Renew: new expiry = old expiry + 30/60/90 days; the user is
+        RENAMED to the new date (the name encodes the expiry) and the
+        expiry moves with it. GB limit is unchanged.
+        Marzban 0.8.4 IGNORES a username field in PUT /api/user (verified
+        live 2026-11-27: PUT returns 200 echoing the OLD name), so a
+        rename is done as DELETE + RECREATE with the new name — same
+        pattern as swap_user / tg_marzban_recreate.py. The fresh user
+        starts with used=0 (a renewal = a fresh allowance period).
+        Returns (new_record, new_name)."""
+        cur = self.get_user(username)
+        if not cur:
+            raise PanelError("renew: user not found: %s" % username)
+        _base, old_date = parse_name_date(username)
+        if old_date is None:
+            if not cur.get("expiry"):
+                raise PanelError("renew: no expiry date on %s" % username)
+            old_date = datetime.fromtimestamp(cur["expiry"], MM).date()
+        new_name, new_date = renew_name_and_date(username, old_date, months)
+        new_exp = int(datetime(new_date.year, new_date.month, new_date.day,
+                               23, 59, tzinfo=MM).timestamp())
+        was_enabled = bool(cur.get("enable", True))
+        self.delete_user(username)
+        try:
+            rec = self.create_user(new_name, cur["limit"] or 0, new_exp)
+        except Exception:
+            raise PanelError("renew: old key deleted but recreate failed — "
+                             "recreate %s manually on the panel" % new_name)
+        if not was_enabled:
+            rec = self.update_user(new_name, status="disabled")
+        return rec, new_name
+
+    def swap_user(self, username):
+        """Swap: DELETE the old user first, then create a fresh one with
+        the SAME name / expiry / GB but a fresh random password (the
+        create path PUTs the explicit password, per the hard-won lesson).
+        Returns the new record."""
+        cur = self.get_user(username)
+        if not cur:
+            raise PanelError("swap: user not found: %s" % username)
+        was_enabled = bool(cur.get("enable", True))
+        self.delete_user(username)
+        try:
+            rec = self.create_user(username, cur["limit"] or 0,
+                                   cur["expiry"] or 0)
+        except Exception:
+            raise PanelError("swap: old key deleted but recreate failed — "
+                             "recreate %s manually on the panel" % username)
+        if not was_enabled:
+            rec = self.update_user(username, status="disabled")
+        return rec
+
+    def toggle_user(self, username, enable):
+        return self.update_user(username,
+                                status="active" if enable else "disabled")
+
+    def set_gb_user(self, username, total_gb_bytes):
+        return self.update_user(username, data_limit=int(total_gb_bytes))
+
     def delete_user(self, username):
         r = self._request("DELETE", "/api/user/" + urllib.parse.quote(username))
         if r.status_code == 404:
             return True  # already gone
         if r.status_code >= 400:
             raise PanelError("delete failed: %s" % r.text[:200])
-        if self.get_user(username) is not None:
+        if verify_with_retry(lambda: self.get_user(username),
+                             expect_present=False) is not None:
             raise PanelError("delete: user still on panel after delete")
         return True
 
