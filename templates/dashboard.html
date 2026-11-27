@@ -7,6 +7,8 @@
   <div class="stat"><b id="stat-keys">–</b><span>Total keys</span></div>
   <div class="stat"><b class="green" id="stat-expiring">–</b><span>Expiring in 7 days</span></div>
 </div>
+<div id="down-banner"></div>
+<div class="muted small" id="last-checked" style="margin-bottom:4px"></div>
 
 <h2 class="sec" id="search">Find a key</h2>
 <div class="searchbox">
@@ -26,6 +28,7 @@
 {% block scripts %}
 <script>
 loadDashboard();
+setInterval(() => loadDashboard(true), 60000); // auto-refresh health every 60s
 document.getElementById('server-filter').addEventListener('input', filterServers);
 document.getElementById('q').addEventListener('input', debounce(globalSearch, 350));
 if (location.hash === '#search') document.getElementById('q').focus();
