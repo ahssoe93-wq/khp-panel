@@ -3,7 +3,7 @@
 {% set nav='servers' %}
 {% block title %}{{ server.name }} — KHP Panel{% endblock %}
 {% block content %}
-<p><a href="{{ url_for('dashboard') }}" onclick="return navTab(this, event)">← All servers</a></p>
+<p class="back-link"><a href="{{ url_for('dashboard') }}" onclick="return navTab(this, event)">← All servers</a></p>
 <div class="card">
   <div class="row">
     <div class="flag">{{ flag(server.country) }}</div>
@@ -15,8 +15,17 @@
   </div>
 </div>
 
-<button class="btn block" id="add-key-btn" onclick="openAddKey()">+ Add Key</button>
-<div style="height:16px"></div>
+<div class="row" style="margin-bottom:16px">
+  <button class="btn" style="flex:1" onclick="openAddKey()">+ Add Key</button>
+  <button class="btn bulk-btn" style="flex:1" onclick="openBulkCreate()">Bulk Create</button>
+</div>
+
+{# v6.1: bulk delete — checkboxes on every key row, Select all,
+   and a Delete selected (N) button with a two-click confirm. #}
+<div class="sel-bar" id="sel-bar">
+  <label class="sel-all"><input type="checkbox" id="sel-all" onchange="toggleSelectAll(this.checked)"> <span id="sel-all-label">Select all (0)</span></label>
+  <button class="btn danger sm" id="del-sel-btn" style="display:none" onclick="deleteSelected()">Delete selected (0)</button>
+</div>
 
 <div class="searchbox">
   <input id="client-filter" type="search" placeholder="Search keys on this server…" autocomplete="off">
@@ -89,6 +98,44 @@
     </div>
   </div>
 </div>
+{# v6.1: bulk create — base name + count, same months/GB/date rules
+   as a single key. Names come out as {base}-1, {base}-2 … with the
+   same expiry date. #}
+<div class="modal-back" id="bulk-modal">
+  <div class="modal">
+    <h3>Bulk Create Keys — {{ server.name }}</h3>
+    <div id="bulk-form">
+      <label>Base name *</label>
+      <input id="bulk-base" placeholder="e.g. BatchA" autocomplete="off">
+      <p class="muted small">Keys are named {base}-1, {base}-2 … + the expiry date.</p>
+      <label>How many keys? (1–50)</label>
+      <input id="bulk-count" type="number" min="1" max="50" value="5">
+      <div id="bulk-proto-wrap" style="display:none">
+        <label>Key type</label>
+        <div class="seg" id="bulk-proto">
+          <button type="button" data-p="outline" class="sel">Outline</button>
+          <button type="button" data-p="vless">VLESS</button>
+        </div>
+      </div>
+      <label>Months</label>
+      <div class="seg" id="bulk-months">
+        <button type="button" data-m="1" class="sel">1 mo • 400 GB</button>
+        <button type="button" data-m="2">2 mo • 1000 GB</button>
+        <button type="button" data-m="3">3 mo • 1500 GB</button>
+      </div>
+      <label>Custom GB</label>
+      <input id="bulk-gb" type="number" min="1" step="1" placeholder="e.g. 750 — overrides the preset above">
+      <label>Custom expiry date</label>
+      <input id="bulk-date" type="date">
+      <p class="muted small">Leave both blank to use the preset. A custom date also sets the key names' date.</p>
+      <div style="height:16px"></div>
+      <button class="btn block" id="bulk-submit" onclick="submitBulkCreate()">Create keys</button>
+      <div style="height:10px"></div>
+      <button class="btn ghost block" onclick="closeBulkCreate()">Cancel</button>
+    </div>
+    <div id="bulk-result" style="display:none"></div>
+  </div>
+</div>
 {% endblock %}
 {% block scripts %}
 <script>
@@ -118,6 +165,14 @@ document.querySelectorAll('#add-months button').forEach(b => b.addEventListener(
 }));
 document.querySelectorAll('#add-proto button').forEach(b => b.addEventListener('click', () => {
   document.querySelectorAll('#add-proto button').forEach(x => x.classList.remove('sel'));
+  b.classList.add('sel');
+}));
+document.querySelectorAll('#bulk-months button').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('#bulk-months button').forEach(x => x.classList.remove('sel'));
+  b.classList.add('sel');
+}));
+document.querySelectorAll('#bulk-proto button').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('#bulk-proto button').forEach(x => x.classList.remove('sel'));
   b.classList.add('sel');
 }));
 if (location.hash === '#add') openAddKey();
