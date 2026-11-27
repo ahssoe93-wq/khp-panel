@@ -42,6 +42,13 @@ MONTHS_GB = {1: 400, 2: 1000, 3: 1500}
 # connect timeout, read timeout (spec)
 TIMEOUT = (5, 20)
 
+# v6.1: how fresh a Marzban user's online_at must be to count as
+# "currently online" (seconds). Marzban has no "currently connected"
+# endpoint — online_at is the last time the node reported the user
+# online, refreshed while they stay connected. 5 minutes matches the
+# recency the Marzban admin UI itself uses.
+ONLINE_WINDOW_SECS = 300
+
 
 # ---------------------------------------------------------------- helpers
 def add_months(date, months):
@@ -348,6 +355,21 @@ class XuiClient:
                 "password": c.get("password", ""),
             })
         return clients
+
+    def online_emails(self):
+        """Emails currently connected, from POST /panel/api/clients/onlines
+        (verified live on SG-Gift: {"success": true, "obj": ["email", ...]}).
+        Returns None when the endpoint cannot be read — callers must then
+        OMIT the online pill (unknown), never mark everyone Offline."""
+        try:
+            r = self._request("POST", "/panel/api/clients/onlines")
+            data = r.json()
+            obj = data.get("obj") if isinstance(data, dict) else None
+            if isinstance(obj, list):
+                return {e for e in obj if isinstance(e, str)}
+        except Exception:
+            pass
+        return None
 
     def list_vless_clients(self):
         """VLESS clients, deduped by UUID across all vless inbounds.
@@ -973,6 +995,19 @@ class MarzbanClient:
                 meth = u["proxies"]["shadowsocks"].get("method", meth)
             except Exception:
                 pass
+            # v6.1: online = seen within ONLINE_WINDOW_SECS. Marzban's
+            # online_at is a naive ISO string; treated as UTC (to be
+            # confirmed by the live connect test in TEST-REPORT.md).
+            online = False
+            oa = u.get("online_at")
+            if oa:
+                try:
+                    dt = datetime.fromisoformat(str(oa).replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    online = (time.time() - dt.timestamp()) <= ONLINE_WINDOW_SECS
+                except (ValueError, TypeError):
+                    online = False
             out.append({
                 "name": u.get("username", ""),
                 "enable": enable,
@@ -982,6 +1017,7 @@ class MarzbanClient:
                 "status": st,
                 "method": meth,
                 "password": pw,
+                "online": online,
             })
         return out
 
