@@ -274,11 +274,12 @@ def server_health(server, force=False):
         return cached[1]
     try:
         client = make_client(server)
-        online, count, used = client.health()
+        online, count, used, limit = client.health()
         LAST_SEEN[server["id"]] = now
-        result = {"online": True, "clients": count, "used": used, "error": ""}
+        result = {"online": True, "clients": count, "used": used,
+                  "limit": limit, "error": ""}
     except Exception as exc:  # noqa: BLE001 - surfaced to the UI
-        result = {"online": False, "clients": 0, "used": 0,
+        result = {"online": False, "clients": 0, "used": 0, "limit": 0,
                   "error": str(exc)[:200]}
     result["last_seen"] = LAST_SEEN.get(server["id"], 0)
     HEALTH_CACHE[server["id"]] = (now, result)
@@ -548,6 +549,58 @@ def api_gb_key(server_id, name):
                     "limit": rec.get("limit")})
 
 
+@app.route("/api/server/<int:server_id>/clients/<path:name>/edit",
+           methods=["POST"])
+@login_required
+def api_edit_key(server_id, name):
+    """Edit a key (v3): custom GB limit and/or expiry date. Body:
+    {"gb": <GB number, optional>, "expiry_date": "YYYY-MM-DD", optional}.
+    A date change RENAMES the key to the new date (the name encodes the
+    expiry); a GB-only change does not rename. Returns the new name +
+    new link, like the renew endpoint."""
+    server, err = _key_action_server(server_id)
+    if err:
+        return err
+    data = request.get_json(force=True, silent=True) or {}
+    gb = None
+    if data.get("gb") is not None:
+        try:
+            gb = float(data.get("gb"))
+        except (TypeError, ValueError):
+            gb = 0
+        if not gb or gb <= 0 or gb > 100000:
+            return jsonify({"ok": False,
+                            "error": "gb must be a positive number of GB"}), 400
+    new_date = None
+    if data.get("expiry_date"):
+        try:
+            new_date = datetime.strptime(
+                str(data["expiry_date"]).strip(), "%Y-%m-%d").date()
+        except ValueError:
+            return jsonify({"ok": False,
+                            "error": "expiry_date must be YYYY-MM-DD"}), 400
+    if gb is None and new_date is None:
+        return jsonify({"ok": False, "error": "nothing to change"}), 400
+    try:
+        client = make_client(server)
+        gb_bytes = int(gb * 1073741824) if gb is not None else None
+        if server["type"] == "xui":
+            rec, new_name = client.edit_client(name, gb_bytes, new_date)
+        else:
+            rec, new_name = client.edit_user(name, gb_bytes, new_date)
+        link = client.build_link(rec)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 502
+    HEALTH_CACHE.pop(server_id, None)
+    return jsonify({"ok": True, "old_name": name, "name": new_name,
+                    "link": link,
+                    "expiry": rec.get("expiry") or 0,
+                    "expiry_h": (datetime.fromtimestamp(rec["expiry"], MM)
+                                 .strftime("%d %b %Y") if rec.get("expiry")
+                                 else "never"),
+                    "gb": int((rec.get("limit") or 0) // 1073741824)})
+
+
 @app.route("/api/search")
 @login_required
 def api_search():
@@ -603,7 +656,7 @@ def api_test(server_id):
         return jsonify({"ok": False, "error": "server not found"}), 404
     try:
         client = make_client(server)
-        online, count, used = client.health()
+        online, count, used, _limit = client.health()
         return jsonify({"ok": True, "online": True, "clients": count,
                         "used_h": fmt_gb(used)})
     except Exception as exc:  # noqa: BLE001
