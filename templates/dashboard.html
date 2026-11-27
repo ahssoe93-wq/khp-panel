@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% set nav='servers' %}
+{% block title %}Servers — KHP Panel{% endblock %}
+{% block content %}
+<div class="stats">
+  <div class="stat"><b id="stat-servers">–</b><span>Servers online</span></div>
+  <div class="stat"><b id="stat-keys">–</b><span>Total keys</span></div>
+  <div class="stat"><b class="green" id="stat-expiring">–</b><span>Expiring in 7 days</span></div>
+</div>
+
+<h2 class="sec" id="search">Find a key</h2>
+<div class="searchbox">
+  <input id="q" type="search" placeholder="Customer name — searches ALL servers…" autocomplete="off">
+</div>
+<div id="search-results"></div>
+
+<h2 class="sec">Expiring soon</h2>
+<div id="expiring"><div class="spin">Loading…</div></div>
+
+<h2 class="sec">Servers</h2>
+<div class="searchbox">
+  <input id="server-filter" type="search" placeholder="Filter servers…" autocomplete="off">
+</div>
+<div id="server-list"><div class="spin">Loading servers…</div></div>
+{% endblock %}
+{% block scripts %}
+<script>
+loadDashboard();
+document.getElementById('server-filter').addEventListener('input', filterServers);
+document.getElementById('q').addEventListener('input', debounce(globalSearch, 350));
+if (location.hash === '#search') document.getElementById('q').focus();
+</script>
+{% endblock %}
