@@ -122,6 +122,7 @@ async function loadDashboard(force) {
     }
     const ej = await expP;
     if (ej) applyExpiring(ej.results);
+    snapshotTab('/dashboard');
   } catch (e) {
     document.getElementById('server-list').innerHTML =
       '<div class="error">Could not load servers: ' + esc(e.message) + '</div>';
@@ -153,6 +154,7 @@ async function refreshDashboardQuiet() {
     }
     const ej = await expP;
     if (ej) applyExpiring(ej.results);
+    snapshotTab('/dashboard');
   } catch (e) { /* quiet: a failed background tick just tries again next minute */ }
 }
 function applyExpiring(results) {
@@ -168,14 +170,7 @@ function initDashboard() {
   if (DASH_TIMER) { clearInterval(DASH_TIMER); DASH_TIMER = null; }
   loadDashboard();
   DASH_TIMER = setInterval(refreshDashboardQuiet, 60000);
-  const sf = document.getElementById('server-filter');
-  if (sf) sf.addEventListener('input', filterServers);
-  const q = document.getElementById('q');
-  if (q) q.addEventListener('input', debounce(globalSearch, 350));
-  if (location.hash === '#search') {
-    const q2 = document.getElementById('q');
-    if (q2) q2.focus();
-  }
+  bindDashboardInputs();
   setTimeout(() => prefetchTab('/settings'), 800); // other tab, ready instantly
 }
 function initSettings() {
@@ -784,6 +779,38 @@ function prefetchTab(url) {
     if (main) NAV_CACHE[url] = {title: doc.title, html: main.innerHTML};
   }).catch(() => { /* prefetch is best-effort; the click will fetch */ });
 }
+/* v4.1: snapshot the POPULATED tab HTML after a successful load, so a
+   later tab switch restores live numbers instead of the template's
+   "Loading servers…" spinners. The template HTML in NAV_CACHE is only
+   a first-visit fallback; the snapshot replaces it. */
+function snapshotTab(url) {
+  const main = document.querySelector('main');
+  if (!main) return;
+  const q = document.getElementById('q');
+  const sf = document.getElementById('server-filter');
+  NAV_CACHE[url] = {title: document.title, html: main.innerHTML, populated: true,
+    q: q ? q.value : '', sf: sf ? sf.value : ''};
+}
+function bindDashboardInputs() {
+  const sf = document.getElementById('server-filter');
+  if (sf) sf.addEventListener('input', filterServers);
+  const q = document.getElementById('q');
+  if (q) q.addEventListener('input', debounce(globalSearch, 350));
+  if (location.hash === '#search') {
+    const q2 = document.getElementById('q');
+    if (q2) q2.focus();
+  }
+}
+/* Quiet re-init used when a tab is restored from a populated snapshot:
+   no full load, no spinner — just restart the 60s timer and refresh
+   silently in the background. */
+function initDashboardQuiet() {
+  if (DASH_TIMER) { clearInterval(DASH_TIMER); DASH_TIMER = null; }
+  DASH_TIMER = setInterval(refreshDashboardQuiet, 60000);
+  bindDashboardInputs();
+  refreshDashboardQuiet();
+  setTimeout(() => prefetchTab('/settings'), 800);
+}
 function swapMain(url, data, push) {
   const main = document.querySelector('main');
   if (!main) return false;
@@ -792,13 +819,21 @@ function swapMain(url, data, push) {
   // "unchanged" cache is stale here and must be reset.
   lastServersHtml = null; lastExpiringHtml = null;
   main.innerHTML = data.html;
+  if (data.populated) { // restore what the user had typed before the switch
+    const q = document.getElementById('q');
+    if (q && data.q) q.value = data.q;
+    const sf = document.getElementById('server-filter');
+    if (sf && data.sf) sf.value = data.sf;
+  }
   document.title = data.title;
   const tab = url === '/settings' ? 'settings' : 'servers';
   document.querySelectorAll('nav.bottom a[data-tab]').forEach(a => {
     a.classList.toggle('on', a.dataset.tab === tab);
   });
   if (push) history.pushState({tab: url}, '', url);
-  if (url === '/settings') initSettings(); else initDashboard();
+  if (url === '/settings') initSettings();
+  else if (data.populated) initDashboardQuiet();
+  else initDashboard();
   window.scrollTo(0, 0);
   return true;
 }
@@ -871,6 +906,7 @@ async function loadSettings() {
       '<button class="btn ghost" style="color:var(--red);border-color:rgba(239,68,68,.5)" onclick="removeServer(' + s.id + ', \'' + esc(s.name) + '\', this)">Remove</button>' +
       '</div><div class="muted small" id="test-' + s.id + '" style="margin-top:8px"></div></div>'
     ).join('');
+    snapshotTab('/settings');
   } catch (e) {
     document.getElementById('settings-list').innerHTML =
       '<div class="error">Could not load servers: ' + esc(e.message) + '</div>';
