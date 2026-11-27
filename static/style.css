@@ -331,3 +331,54 @@ nav.bottom a.on { color: var(--emerald); font-weight: 700; }
 .btn.sm.red { color: var(--red); border-color: rgba(239,68,68,.5); }
 .client.expiring-today { border-color: var(--red); }
 .client .name-row { display: flex; align-items: center; gap: 8px; }
+
+/* ---- v4 ---- */
+/* dashboard section headings — ALL CAPS, one colour each */
+h2.sec { text-transform: uppercase; letter-spacing: 0.5px; }
+h2.sec-find { color: #38bdf8; }
+h2.sec-servers { color: var(--emerald); font-size: 22px; letter-spacing: 1px; }
+h2.sec-exp { color: #f59e0b; }
+/* stat numbers — one colour each (down state still turns it red) */
+.stat b.stat-green { color: var(--emerald); }
+.stat b.stat-blue { color: #38bdf8; }
+.stat b.stat-red { color: var(--red); }
+/* NEW badge on just-created keys */
+.badge-new {
+  background: var(--emerald); color: var(--bg);
+  font-size: 11px; font-weight: 800;
+  border-radius: 12px; padding: 2px 8px;
+  vertical-align: middle; margin-left: 8px;
+}
+.client.is-new { border-color: var(--emerald); }
+/* slimmer usage bar on key cards */
+.client .bar { height: 5px; margin-top: 8px; }
+/* collapsible "Expiring soon" header (v4) — tap to show/hide */
+.sec-head {
+  display: flex; align-items: center; gap: 10px;
+  margin: 22px 0 10px; cursor: pointer; user-select: none;
+}
+.sec-head h2.sec { margin: 0; flex: none; }
+.sec-head .chev { color: var(--muted); font-size: 14px; }
+.badge-exp {
+  background: var(--red); color: #fff;
+  font-size: 13px; font-weight: 800;
+  border-radius: 12px; padding: 2px 9px;
+  margin-left: auto;
+}
+/* bottom nav — one colour per tab; active tab is a filled pill */
+nav.bottom a { margin: 8px 6px; border-radius: 20px; padding: 10px 0 12px; }
+nav.bottom a.nav-servers { color: var(--emerald); }
+nav.bottom a.nav-search { color: #38bdf8; }
+nav.bottom a.nav-settings { color: #f59e0b; }
+nav.bottom a.on.nav-servers { background: var(--emerald); color: var(--bg); }
+nav.bottom a.on.nav-search { background: #38bdf8; color: var(--bg); }
+nav.bottom a.on.nav-settings { background: #f59e0b; color: var(--bg); }
+/* small flag tile on Settings rows */
+.flag-sm {
+  width: 40px; height: 40px; flex: none;
+  background: var(--surface2);
+  border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden; font-weight: 700; font-size: 14px;
+}
+.flag-sm svg.flag-svg { width: 100%; height: 100%; display: block; }
