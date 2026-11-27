@@ -18,14 +18,14 @@
   <a class="chip" href="{{ url_for('logout') }}">Logout</a>
   {% endif %}
 </header>
-<main>
+<main id="page">
   {% block content %}{% endblock %}
 </main>
 {% if session.get('logged_in') %}
 <nav class="bottom">
-  <a href="{{ url_for('dashboard') }}" class="{{ 'on' if nav=='servers' else '' }}">Servers</a>
-  <a href="{{ url_for('dashboard') }}#search" class="{{ 'on' if nav=='search' else '' }}">Search</a>
-  <a href="{{ url_for('settings') }}" class="{{ 'on' if nav=='settings' else '' }}">Settings</a>
+  <a href="{{ url_for('dashboard') }}" data-tab="servers" onclick="return navTab(this, event)" class="nav-servers {{ 'on' if nav=='servers' else '' }}">Servers</a>
+  <a href="{{ url_for('dashboard') }}#search" data-tab="search" onclick="return navTab(this, event)" class="nav-search {{ 'on' if nav=='search' else '' }}">Search</a>
+  <a href="{{ url_for('settings') }}" data-tab="settings" onclick="return navTab(this, event)" class="nav-settings {{ 'on' if nav=='settings' else '' }}">Settings</a>
 </nav>
 {% endif %}
 <div id="toast"></div>
