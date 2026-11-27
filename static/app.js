@@ -53,25 +53,31 @@ function starPoints(cx, cy, rO, rI) {
 function flagSVG(country) {
   const c = (country || '').toLowerCase();
   const open = '<svg class="flag-svg" viewBox="0 0 60 40" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">';
-  if (c === 'singapore') {
+  // Live DB stores country as codes (SG/JP/TH); accept those AND full names.
+  if (c === 'singapore' || c === 'sg') {
     const stars = [[24, 4.5], [29.2, 8.3], [27.2, 14.5], [20.8, 14.5], [18.8, 8.3]]
       .map(([x, y]) => '<polygon points="' + starPoints(x, y, 2.3, 0.95) + '" fill="#fff"/>').join('');
     return open + '<rect width="60" height="20" fill="#ef3340"/><rect y="20" width="60" height="20" fill="#fff"/>' +
       '<circle cx="12" cy="10" r="8" fill="#fff"/><circle cx="16" cy="10" r="6.8" fill="#ef3340"/>' + stars + '</svg>';
   }
-  if (c === 'thailand') {
+  if (c === 'thailand' || c === 'th') {
     return open + '<rect width="60" height="40" fill="#ef3340"/>' +
       '<rect y="6.7" width="60" height="6.6" fill="#fff"/>' +
       '<rect y="13.3" width="60" height="13.4" fill="#241d4f"/>' +
       '<rect y="26.7" width="60" height="6.6" fill="#fff"/></svg>';
   }
-  if (c === 'japan') {
+  if (c === 'japan' || c === 'jp') {
     return open + '<rect width="60" height="40" fill="#fff"/>' +
       '<circle cx="30" cy="20" r="12" fill="#bc002d"/></svg>';
   }
   return (country || '??').slice(0, 2).toUpperCase();
 }
 function flagFor(country) { return flagSVG(country); }
+// Display name for a country value: live DB stores codes (SG/JP/TH).
+function countryName(c) {
+  const m = {sg: 'Singapore', jp: 'Japan', th: 'Thailand'};
+  return m[(c || '').toLowerCase()] || c || 'Other';
+}
 function fmtGB(n) {
   if (!n) return '0 GB';
   return Math.round(n / 1073741824).toLocaleString('en-US') + ' GB';
@@ -153,7 +159,7 @@ function renderServers() {
     (groups[g] = groups[g] || []).push(s);
   });
   const order = Object.keys(groups).sort((a, b) => {
-    const ia = COUNTRY_ORDER.indexOf(a), ib = COUNTRY_ORDER.indexOf(b);
+    const ia = COUNTRY_ORDER.indexOf(countryName(a)), ib = COUNTRY_ORDER.indexOf(countryName(b));
     if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
     return a.localeCompare(b);
   });
@@ -163,7 +169,7 @@ function renderServers() {
     const chev = collapsed ? '▼' : '▲';
     let html = '<div class="group-h" onclick="toggleGroup(\'' + esc(g) + '\')">' +
       '<span class="gflag">' + flagFor(g === 'Other' ? '' : g) + '</span>' +
-      '<b>' + esc(g) + '</b><span class="muted small">• ' + items.length + ' server' +
+      '<b>' + esc(countryName(g)) + '</b><span class="muted small">• ' + items.length + ' server' +
       (items.length === 1 ? '' : 's') + '</span>' +
       '<span class="chev">' + chev + '</span></div>';
     if (collapsed) return html;
