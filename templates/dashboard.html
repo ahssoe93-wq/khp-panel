@@ -3,9 +3,10 @@
 {% block title %}Servers — KHP Panel{% endblock %}
 {% block content %}
 <div class="stats">
-  <div class="stat"><b class="stat-green" id="stat-servers">–</b><span>Servers online</span></div>
-  <div class="stat"><b class="stat-blue" id="stat-keys">–</b><span>Total keys</span></div>
-  <div class="stat"><b class="stat-red" id="stat-expiring">–</b><span>Expiring in 7 days</span></div>
+  <div class="stat stat-green"><b class="stat-green" id="stat-servers">–</b><span>Servers online</span></div>
+  <div class="stat stat-blue"><b class="stat-blue" id="stat-keys">–</b><span>Active keys</span></div>
+  <div class="stat stat-yellow"><b class="stat-yellow" id="stat-expiring3">–</b><span>Expiring in 3 days</span></div>
+  <div class="stat stat-red"><b class="stat-red" id="stat-expired">–</b><span>Expired keys</span></div>
 </div>
 <div id="down-banner"></div>
 <div class="muted small" id="last-checked" style="margin-bottom:4px"></div>
@@ -22,14 +23,32 @@
 </div>
 <div id="server-list"><div class="spin">Loading servers…</div></div>
 
-<!-- Expiring soon (v4): collapsible — tap the header to show/hide -->
-<div class="sec-head" id="expiring-head" onclick="toggleExpiring()">
-  <h2 class="sec sec-exp">Expiring soon</h2>
-  <span class="muted small" id="exp-hint">tap to show</span>
-  <span class="badge-exp" id="exp-count"></span>
-  <span class="chev" id="exp-chev">▼</span>
+<!-- v6.1: three key sections — EXPIRING IN 3 DAYS (yellow), LOW GB
+     (orange), EXPIRED KEYS (red). All three start collapsed; tap the
+     bar to show the list. -->
+<div class="sec-head" id="exp3-head" onclick="toggleKeySection('exp3')">
+  <h2 class="sec sec-exp3">Expiring in 3 days</h2>
+  <span class="muted small" id="exp3-hint">tap to show</span>
+  <span class="badge-exp" id="exp3-count"></span>
+  <span class="chev" id="exp3-chev">▼</span>
 </div>
-<div id="expiring" style="display:none"><div class="spin">Loading…</div></div>
+<div id="exp3-list" style="display:none"></div>
+
+<div class="sec-head" id="lowgb-head" onclick="toggleKeySection('lowgb')">
+  <h2 class="sec sec-lowgb">Low GB — under 10 GB left</h2>
+  <span class="muted small" id="lowgb-hint">tap to show</span>
+  <span class="badge-lowgb" id="lowgb-count"></span>
+  <span class="chev" id="lowgb-chev">▼</span>
+</div>
+<div id="lowgb-list" style="display:none"></div>
+
+<div class="sec-head" id="expired-head" onclick="toggleKeySection('expired')">
+  <h2 class="sec sec-expired">Expired keys</h2>
+  <span class="muted small" id="expired-hint">tap to show</span>
+  <span class="badge-expired" id="expired-count"></span>
+  <span class="chev" id="expired-chev">▼</span>
+</div>
+<div id="expired-list" style="display:none"></div>
 {% endblock %}
 {% block scripts %}
 <script>
