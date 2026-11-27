@@ -34,8 +34,15 @@ function esc(s) {
 /* ---------------- dashboard ---------------- */
 let SERVERS = [], HEALTH = {};
 let EXPIRING = [], EXPIRING_ALL = false, EXP_COUNTS = {};
+let EXP_LOADED = false;
+// v4: "Expiring soon" starts COLLAPSED (tap the header to show). The
+// choice is remembered on this device.
+let EXP_COLLAPSED = localStorage.getItem('khp_exp_collapsed') !== '0';
 let COLLAPSED = new Set();
 let CHECKED_AT = 0;
+let DASH_TIMER = null; // 60s quiet auto-refresh timer (cleared on tab switch)
+let NAV_CACHE = {}; // prefetched tab HTML, for instant tab switching
+let lastServersHtml = null, lastExpiringHtml = null;
 const COUNTRY_ORDER = ['Singapore', 'Japan', 'Thailand'];
 /* Inline SVG country flags (v3) — drawn shapes, NO emoji font needed.
    Emoji flags rendered as plain "SG"/"TH"/"JP" letters on the user's
@@ -86,42 +93,95 @@ function fmtTime(ts) {
   if (!ts) return 'never';
   return new Date(ts * 1000).toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
 }
+/* v4: load the three dashboard feeds IN PARALLEL (was sequential), and
+   never show a spinner after the first load — the auto-refresh updates
+   in place, silently. Each feed is applied as soon as it arrives: the
+   server list must not wait for the (slow) expiring scan. */
 async function loadDashboard(force) {
   try {
-    const j = await api('/api/servers');
-    SERVERS = j.servers;
+    const healthP = api('/api/health' + (force ? '?force=1' : '')).catch(() => null);
+    const expP = api('/api/expiring?days=7').catch(() => null);
+    const sj = await api('/api/servers');
+    SERVERS = sj.servers;
     renderServers();
-    const h = await api('/api/health' + (force ? '?force=1' : ''));
-    HEALTH = {};
-    h.health.forEach(x => HEALTH[x.id] = x);
-    CHECKED_AT = h.checked_at || 0;
-    renderServers();
-    renderDownBanner(h.health);
-    const online = h.health.filter(x => x.online).length;
-    const statEl = document.getElementById('stat-servers');
-    statEl.textContent = online + ' / ' + h.health.length;
-    statEl.parentElement.classList.toggle('down', online < h.health.length);
-    document.getElementById('stat-keys').textContent =
-      h.health.reduce((a, x) => a + (x.clients || 0), 0).toLocaleString('en-US');
-    document.getElementById('last-checked').textContent =
-      'Last checked ' + fmtTime(CHECKED_AT) + ' • auto-refresh every 60s';
+    const h = await healthP;
+    if (h) {
+      HEALTH = {};
+      h.health.forEach(x => HEALTH[x.id] = x);
+      CHECKED_AT = h.checked_at || 0;
+      renderDownBanner(h.health);
+      const online = h.health.filter(x => x.online).length;
+      const statEl = document.getElementById('stat-servers');
+      statEl.textContent = online + ' / ' + h.health.length;
+      statEl.parentElement.classList.toggle('down', online < h.health.length);
+      document.getElementById('stat-keys').textContent =
+        h.health.reduce((a, x) => a + (x.clients || 0), 0).toLocaleString('en-US');
+      document.getElementById('last-checked').textContent =
+        'Last checked ' + fmtTime(CHECKED_AT) + ' • auto-refresh every 60s';
+      renderServers();
+    }
+    const ej = await expP;
+    if (ej) applyExpiring(ej.results);
   } catch (e) {
     document.getElementById('server-list').innerHTML =
       '<div class="error">Could not load servers: ' + esc(e.message) + '</div>';
   }
+}
+/* v4: the 60s auto-refresh — quiet. No spinner, no "Loading servers…"
+   flash, no resetting the user's See-all choice; the renderers only
+   touch the DOM when the HTML actually changed. */
+async function refreshDashboardQuiet() {
+  if (!document.getElementById('server-list')) return; // not on dashboard
   try {
-    const j = await api('/api/expiring?days=7');
-    EXPIRING = j.results;
-    EXPIRING_ALL = false;
-    EXP_COUNTS = {};
-    j.results.forEach(c => EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1);
-    document.getElementById('stat-expiring').textContent = j.results.length;
-    renderExpiring();
-    renderServers(); // expiring counts feed the server cards
-  } catch (e) {
-    document.getElementById('expiring').innerHTML =
-      '<div class="error">Could not load expiring keys.</div>';
+    const healthP = api('/api/health').catch(() => null);
+    const expP = api('/api/expiring?days=7').catch(() => null);
+    const h = await healthP;
+    if (h) {
+      HEALTH = {};
+      h.health.forEach(x => HEALTH[x.id] = x);
+      CHECKED_AT = h.checked_at || 0;
+      renderDownBanner(h.health);
+      const online = h.health.filter(x => x.online).length;
+      const statEl = document.getElementById('stat-servers');
+      statEl.textContent = online + ' / ' + h.health.length;
+      statEl.parentElement.classList.toggle('down', online < h.health.length);
+      document.getElementById('stat-keys').textContent =
+        h.health.reduce((a, x) => a + (x.clients || 0), 0).toLocaleString('en-US');
+      document.getElementById('last-checked').textContent =
+        'Last checked ' + fmtTime(CHECKED_AT) + ' • auto-refresh every 60s';
+      renderServers();
+    }
+    const ej = await expP;
+    if (ej) applyExpiring(ej.results);
+  } catch (e) { /* quiet: a failed background tick just tries again next minute */ }
+}
+function applyExpiring(results) {
+  EXPIRING = results;
+  EXP_LOADED = true;
+  EXP_COUNTS = {};
+  results.forEach(c => EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1);
+  document.getElementById('stat-expiring').textContent = results.length;
+  renderExpiring();
+  renderServers(); // expiring counts feed the server cards
+}
+function initDashboard() {
+  if (DASH_TIMER) { clearInterval(DASH_TIMER); DASH_TIMER = null; }
+  loadDashboard();
+  DASH_TIMER = setInterval(refreshDashboardQuiet, 60000);
+  const sf = document.getElementById('server-filter');
+  if (sf) sf.addEventListener('input', filterServers);
+  const q = document.getElementById('q');
+  if (q) q.addEventListener('input', debounce(globalSearch, 350));
+  if (location.hash === '#search') {
+    const q2 = document.getElementById('q');
+    if (q2) q2.focus();
   }
+  setTimeout(() => prefetchTab('/settings'), 800); // other tab, ready instantly
+}
+function initSettings() {
+  if (DASH_TIMER) { clearInterval(DASH_TIMER); DASH_TIMER = null; }
+  loadSettings();
+  setTimeout(() => prefetchTab('/dashboard'), 800);
 }
 function renderDownBanner(health) {
   const el = document.getElementById('down-banner');
@@ -151,7 +211,11 @@ function renderServers() {
   const f = (document.getElementById('server-filter').value || '').toLowerCase();
   const list = SERVERS.filter(s => s.name.toLowerCase().includes(f) ||
     (s.country || '').toLowerCase().includes(f));
-  if (!list.length) { el.innerHTML = '<div class="empty">No servers yet — add one in Settings.</div>'; return; }
+  if (!list.length) {
+    const html = '<div class="empty">No servers yet — add one in Settings.</div>';
+    if (lastServersHtml !== html) { el.innerHTML = html; lastServersHtml = html; }
+    return;
+  }
   // group by country: Singapore / Japan / Thailand first, then the rest
   const groups = {};
   list.forEach(s => {
@@ -163,7 +227,7 @@ function renderServers() {
     if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
     return a.localeCompare(b);
   });
-  el.innerHTML = order.map(g => {
+  const html = order.map(g => {
     const items = groups[g];
     const collapsed = COLLAPSED.has(g);
     const chev = collapsed ? '▼' : '▲';
@@ -210,17 +274,42 @@ function renderServers() {
     }).join('');
     return html;
   }).join('');
+  // v4: only touch the DOM when the HTML actually changed — replacing
+  // identical markup every 60s is what made the list visibly flicker.
+  if (lastServersHtml !== html) { el.innerHTML = html; lastServersHtml = html; }
 }
 function toggleGroup(g) {
   if (COLLAPSED.has(g)) COLLAPSED.delete(g); else COLLAPSED.add(g);
   renderServers();
 }
 function filterServers() { renderServers(); }
+/* v4: "Expiring soon" is collapsible (default collapsed). The header
+   always shows the count; the list only renders when expanded. */
+function toggleExpiring() {
+  EXP_COLLAPSED = !EXP_COLLAPSED;
+  localStorage.setItem('khp_exp_collapsed', EXP_COLLAPSED ? '1' : '0');
+  renderExpiring();
+}
 function renderExpiring() {
+  const head = document.getElementById('expiring-head');
   const el = document.getElementById('expiring');
-  if (!EXPIRING.length) { el.innerHTML = '<div class="empty">Nothing expiring in the next 7 days.</div>'; return; }
+  if (!el) return;
+  const countEl = document.getElementById('exp-count');
+  if (countEl) countEl.textContent = EXP_LOADED ? EXPIRING.length : '';
+  const hint = document.getElementById('exp-hint');
+  if (hint) hint.textContent = EXP_COLLAPSED ? 'tap to show' : 'tap to hide';
+  const chev = document.getElementById('exp-chev');
+  if (chev) chev.textContent = EXP_COLLAPSED ? '▼' : '▲';
+  if (EXP_COLLAPSED) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  if (!EXP_LOADED) { el.innerHTML = '<div class="spin">Loading…</div>'; return; }
+  if (!EXPIRING.length) {
+    const html = '<div class="empty">Nothing expiring in the next 7 days.</div>';
+    if (lastExpiringHtml !== html) { el.innerHTML = html; lastExpiringHtml = html; }
+    return;
+  }
   const shown = EXPIRING_ALL ? EXPIRING : EXPIRING.slice(0, 5);
-  el.innerHTML = shown.map(c =>
+  const html = shown.map(c =>
     '<div class="card client"><div class="row"><div class="grow">' +
     '<div class="name">' + esc(c.name) + '</div>' +
     '<div class="muted small">' + esc(c.server_name) + ' • expires ' + esc(c.expiry_h) +
@@ -236,6 +325,7 @@ function renderExpiring() {
     ? '<button class="see-all" onclick="EXPIRING_ALL=true;renderExpiring()">See all ' + EXPIRING.length + ' →</button>'
     : (EXPIRING_ALL && EXPIRING.length > 5
       ? '<button class="see-all" onclick="EXPIRING_ALL=false;renderExpiring()">Show less ↑</button>' : ''));
+  if (lastExpiringHtml !== html) { el.innerHTML = html; lastExpiringHtml = html; }
 }
 async function globalSearch() {
   const q = document.getElementById('q').value.trim();
@@ -258,13 +348,97 @@ async function globalSearch() {
 }
 
 /* ---------------- server page ---------------- */
-let SORT_BY = 'expiry', FILTER_BY = 'all';
+let SORT_BY = 'newest'; // v4: newest keys first (was expiry)
+let FILTER_BY = 'all';
 const PAGE_SIZE = 20;
 let SHOWN = PAGE_SIZE;
 const ARMED = {}; // two-click confirm state, keyed by action+name
-function refreshAfterAction() {
-  if (document.getElementById('client-list')) loadServerPage();
-  if (document.getElementById('server-list')) loadDashboard(true);
+/* v4 SPEED: after a key action, update ONLY that key's row from the
+   action's own response — no full /clients re-fetch, no health re-check
+   of all 12 servers, no spinner. The list is then quietly re-synced
+   with the panel in the background a couple of seconds later. */
+let QUIET_SYNC_TIMER = null;
+function scheduleQuietSync(serverId) {
+  if (QUIET_SYNC_TIMER) clearTimeout(QUIET_SYNC_TIMER);
+  QUIET_SYNC_TIMER = setTimeout(() => silentReloadServer(serverId), 2500);
+}
+/* v4: an action starting cancels any pending quiet sync, so no background
+   fetch can land in the middle of it (see the race note in
+   silentReloadServer). The action schedules a fresh sync when it succeeds. */
+function clearQuietSync() {
+  if (QUIET_SYNC_TIMER) { clearTimeout(QUIET_SYNC_TIMER); QUIET_SYNC_TIMER = null; }
+}
+async function silentReloadServer(serverId) {
+  // No spinner, no error box: a failed background sync just leaves the
+  // (already correct) local rows in place.
+  // v4 race fix: never reload while an action modal is open — a background
+  // fetch that lands mid-rename sees the NEW name with created_at=0 (the
+  // panel_keys row is moved only when the rename request finishes), and
+  // overwriting the list with that snapshot drops the NEW badge and makes
+  // the follow-up patch miss (it looks the key up by its OLD name).
+  // The action's own scheduleQuietSync refreshes after it completes.
+  if (document.querySelector('.modal.open')) return;
+  try {
+    if (document.getElementById('client-list') && serverId === SERVER_ID) {
+      const j = await api('/api/server/' + serverId + '/clients');
+      // v4: a modal may have opened while this fetch was in flight — a
+      // snapshot taken mid-rename is stale, so drop it; the action's own
+      // quiet sync refreshes once it finishes.
+      if (document.querySelector('.modal.open')) return;
+      ALL_CLIENTS = j.clients;
+      document.getElementById('count-all').textContent = ALL_CLIENTS.length;
+      renderClients();
+    } else if (document.getElementById('server-list')) {
+      refreshDashboardQuiet();
+    }
+  } catch (e) { /* ignore — local rows already show the result */ }
+}
+function applyKeyPatch(serverId, oldName, patch) {
+  // patch: {name?, expiry?, expiry_h?, gb?, limit?, used?, enable?, status?, created_at?, remove?}
+  const now = Date.now() / 1000;
+  if (typeof ALL_CLIENTS !== 'undefined' && document.getElementById('client-list')) {
+    if (patch.remove) {
+      ALL_CLIENTS = ALL_CLIENTS.filter(c => c.name !== oldName);
+    } else {
+      // v4: match the OLD name first; if the list was already refreshed to
+      // the NEW name (rename landed before this patch), update that row
+      // instead of silently doing nothing.
+      const c = ALL_CLIENTS.find(x => x.name === oldName) ||
+        (patch.name ? ALL_CLIENTS.find(x => x.name === patch.name) : undefined);
+      if (c) {
+        if (patch.name) c.name = patch.name;
+        if (patch.expiry != null) { c.expiry = patch.expiry; c.expiry_h = patch.expiry_h || c.expiry_h; }
+        if (patch.limit != null) { c.limit = patch.limit; c.limit_h = fmtGB(patch.limit); c.pct = c.limit ? Math.min(100, Math.round(c.used * 100 / c.limit)) : 0; }
+        if (patch.used != null) { c.used = patch.used; c.used_h = fmtGB(patch.used); c.pct = c.limit ? Math.min(100, Math.round(c.used * 100 / c.limit)) : 0; }
+        if (patch.enable != null) c.enable = patch.enable;
+        if (patch.status) c.status = patch.status;
+        if (patch.created_at != null) c.created_at = patch.created_at;
+      }
+    }
+    renderClients();
+  }
+  // dashboard "Expiring soon" rows use the same actions: keep them in sync
+  if (document.getElementById('expiring') && EXP_LOADED) {
+    if (patch.remove) {
+      EXPIRING = EXPIRING.filter(c => !(c.server_id === serverId && c.name === oldName));
+    } else {
+      const c = EXPIRING.find(x => x.server_id === serverId && x.name === oldName);
+      if (c) {
+        if (patch.name) c.name = patch.name;
+        if (patch.expiry != null) { c.expiry = patch.expiry; c.expiry_h = patch.expiry_h || c.expiry_h; }
+        if (patch.limit != null) c.limit = patch.limit;
+        if (patch.enable != null) c.enable = patch.enable;
+        if (patch.status) c.status = patch.status;
+      }
+    }
+    // a renewed/edited key leaves the 7-day window — drop it from the list
+    EXPIRING = EXPIRING.filter(c => c.expiry && c.expiry - now <= 7 * 86400);
+    EXP_COUNTS = {};
+    EXPIRING.forEach(c => EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1);
+    document.getElementById('stat-expiring').textContent = EXPIRING.length;
+    renderExpiring();
+    renderServers();
+  }
 }
 async function loadServerPage() {
   try {
@@ -292,13 +466,28 @@ function filteredClients() {
     list = list.filter(c => c.expiry && c.expiry - now <= 7 * 86400);
   if (FILTER_BY === 'high')
     list = list.filter(c => c.pct >= 70);
-  if (SORT_BY === 'expiry')
+  if (SORT_BY === 'newest') {
+    // v4 default: keys this panel created, newest first; keys with no
+    // recorded creation time (created elsewhere / before v4) come after,
+    // soonest-expiring first.
+    list.sort((a, b) => {
+      const ca = a.created_at || 0, cb = b.created_at || 0;
+      if ((ca > 0) !== (cb > 0)) return cb - ca;
+      if (ca && cb) return cb - ca;
+      return (a.expiry || 1e15) - (b.expiry || 1e15);
+    });
+  } else if (SORT_BY === 'expiry')
     list.sort((a, b) => (a.expiry || 1e15) - (b.expiry || 1e15));
   else if (SORT_BY === 'usage')
     list.sort((a, b) => (b.used || 0) - (a.used || 0));
   else
     list.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
   return list;
+}
+function isNewKey(c) {
+  // v4: NEW badge for keys created through this panel in the last 24h.
+  const ca = c.created_at || 0;
+  return ca > 0 && (Date.now() / 1000 - ca) < 24 * 3600;
 }
 function isExpiringToday(c) {
   const now = Date.now() / 1000;
@@ -312,11 +501,15 @@ function renderClients() {
     el.innerHTML = list.slice(0, SHOWN).map(c => {
       const n = esc(c.name).replace(/'/g, "\\'");
       const toggleLabel = c.enable ? 'Disable' : 'Enable';
-      return '<div class="card client' + (isExpiringToday(c) ? ' expiring-today' : '') + '">' +
-      '<div class="row"><div class="grow"><div class="name">' + esc(c.name) + '</div>' +
-      '<div class="muted small">' + esc(c.used_h) + ' / ' + esc(c.limit_h) + ' • exp ' + esc(c.expiry_h) + '</div>' +
-      '<div class="bar"><i style="width:' + c.pct + '%"></i></div></div>' +
+      const isNew = isNewKey(c);
+      // v4 cleaner card: name (+ NEW badge) and status on one row,
+      // usage line below, slim full-width bar, then the buttons.
+      return '<div class="card client' + (isExpiringToday(c) ? ' expiring-today' : '') + (isNew ? ' is-new' : '') + '">' +
+      '<div class="row"><div class="grow"><div class="name">' + esc(c.name) +
+      (isNew ? '<span class="badge-new">NEW</span>' : '') + '</div></div>' +
       '<span class="status ' + c.status + '">' + c.status + '</span></div>' +
+      '<div class="muted small" style="margin-top:4px">' + esc(c.used_h) + ' / ' + esc(c.limit_h) + ' • exp ' + esc(c.expiry_h) + '</div>' +
+      '<div class="bar"><i style="width:' + c.pct + '%"></i></div>' +
       '<div class="actions">' +
       '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + n + '\', this)">Copy link</button>' +
       '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + n + '\')">Renew</button>' +
@@ -361,16 +554,19 @@ function armOrRun(key, btn, armLabel, run) {
 }
 async function deleteKey(serverId, name, btn) {
   armOrRun('del:' + name, btn, 'Sure?', async () => {
+    clearQuietSync();
     try {
       await api('/api/server/' + serverId + '/delete-key', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name})});
       toast('Deleted ' + name);
-      refreshAfterAction();
+      applyKeyPatch(serverId, name, {remove: true});
+      scheduleQuietSync(serverId);
     } catch (e) { toast('Delete failed: ' + e.message); }
   });
 }
 async function swapKey(serverId, name, btn) {
+  clearQuietSync();
   armOrRun('swap:' + name, btn, 'Swap?', async () => {
     btn.disabled = true;
     try {
@@ -378,19 +574,24 @@ async function swapKey(serverId, name, btn) {
         {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
       showActionResult(j.name, j.link, 'Swapped — new password, same name / expiry / GB');
       toast('Swapped ' + name);
-      refreshAfterAction();
+      // fresh password => used traffic resets to 0; it is a new key now
+      applyKeyPatch(serverId, name, {used: 0, limit: j.limit || undefined,
+        created_at: j.created_at || undefined});
+      scheduleQuietSync(serverId);
     } catch (e) { toast('Swap failed: ' + e.message); }
     btn.disabled = false;
   });
 }
 async function toggleKey(serverId, name, enable, btn) {
+  clearQuietSync();
   btn.disabled = true;
   try {
     const j = await api('/api/server/' + serverId + '/clients/' + encodeURIComponent(name) + '/toggle',
       {method: 'POST', headers: {'Content-Type': 'application/json'},
        body: JSON.stringify({enable})});
     toast((j.enable ? 'Enabled ' : 'Disabled ') + name);
-    refreshAfterAction();
+    applyKeyPatch(serverId, name, {enable: j.enable, status: j.status});
+    scheduleQuietSync(serverId);
   } catch (e) { toast('Failed: ' + e.message); }
   btn.disabled = false;
 }
@@ -432,6 +633,7 @@ function openRenewModal(serverId, name) {
     '<button class="btn ghost block" onclick="closeActionModal()">Cancel</button>');
 }
 async function submitRenew(serverId, name, months, btn) {
+  clearQuietSync();
   btn.disabled = true;
   try {
     const j = await api('/api/server/' + serverId + '/clients/' + encodeURIComponent(name) + '/renew',
@@ -440,7 +642,9 @@ async function submitRenew(serverId, name, months, btn) {
     showActionResult(j.name, j.link,
       'renewed +' + months + ' mo • ' + j.gb + ' GB • exp ' + j.expiry_h);
     toast('Renewed → ' + j.name);
-    refreshAfterAction();
+    applyKeyPatch(serverId, name, {name: j.name, expiry: j.expiry,
+      expiry_h: j.expiry_h, limit: j.gb * 1073741824});
+    scheduleQuietSync(serverId);
   } catch (e) { toast('Renew failed: ' + e.message); }
   btn.disabled = false;
 }
@@ -479,6 +683,7 @@ function openEditModal(serverId, name, gbPrefill, datePrefill) {
     '<button class="btn ghost" style="flex:1" onclick="closeActionModal()">Cancel</button></div>');
 }
 async function submitEdit(serverId, name, btn) {
+  clearQuietSync();
   const gbRaw = document.getElementById('edit-gb').value;
   const dateRaw = document.getElementById('edit-date').value;
   const gb = parseFloat(gbRaw);
@@ -497,7 +702,9 @@ async function submitEdit(serverId, name, btn) {
       toast('Updated • ' + j.gb + ' GB • exp ' + j.expiry_h);
       closeActionModal();
     }
-    refreshAfterAction();
+    applyKeyPatch(serverId, name, {name: j.name, expiry: j.expiry,
+      expiry_h: j.expiry_h, limit: j.gb * 1073741824});
+    scheduleQuietSync(serverId);
   } catch (e) { toast('Failed: ' + e.message); }
   btn.disabled = false; btn.textContent = 'Save changes';
 }
@@ -511,24 +718,135 @@ function closeAddKey() {
   document.getElementById('add-modal').classList.remove('open');
 }
 async function submitAddKey() {
+  clearQuietSync();
   const name = document.getElementById('add-name').value.trim();
   const months = parseInt(document.querySelector('#add-months button.sel').dataset.m, 10);
   const btn = document.getElementById('add-submit');
   if (!name) { toast('Enter a customer name'); return; }
+  // v4: optional custom GB / custom expiry date override the preset.
+  const gbRaw = (document.getElementById('add-gb').value || '').trim();
+  const dateRaw = (document.getElementById('add-date').value || '').trim();
+  const body = {name, months};
+  if (gbRaw !== '') {
+    const gb = parseFloat(gbRaw);
+    if (isNaN(gb) || gb <= 0) { toast('Custom GB must be a positive number'); return; }
+    body.gb = gb;
+  }
+  if (dateRaw !== '') {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateRaw)) { toast('Pick a valid date'); return; }
+    const picked = new Date(dateRaw + 'T00:00:00');
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    if (picked < today) { toast('Expiry date is in the past'); return; }
+    body.expiry_date = dateRaw;
+  }
   btn.disabled = true; btn.textContent = 'Creating…';
   try {
     const j = await api('/api/server/' + SERVER_ID + '/add-key', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name, months})});
+      body: JSON.stringify(body)});
     document.getElementById('add-result-name').textContent =
-      j.name + '  •  ' + j.months + ' mo • ' + j.gb + ' GB • exp ' + j.expiry;
+      j.name + '  •  ' + j.summary;
     document.getElementById('add-result-link').textContent = j.link;
     document.getElementById('add-form').style.display = 'none';
     document.getElementById('add-result').style.display = '';
-    loadServerPage();
+    // v4: the new key appears at the top AT ONCE (Newest sort + NEW badge)
+    // — no waiting for a full list re-fetch.
+    if (typeof ALL_CLIENTS !== 'undefined') {
+      ALL_CLIENTS.unshift({
+        name: j.name, server_id: SERVER_ID, status: 'active', enable: true,
+        used: 0, used_h: '0 GB', limit: j.limit, limit_h: fmtGB(j.limit),
+        expiry: j.expiry_ts, expiry_h: j.expiry_h, pct: 0,
+        created_at: j.created_at || Math.floor(Date.now() / 1000),
+      });
+      document.getElementById('count-all').textContent = ALL_CLIENTS.length;
+      SHOWN = PAGE_SIZE;
+      renderClients();
+    }
+    scheduleQuietSync(SERVER_ID);
   } catch (e) { toast('Create failed: ' + e.message); }
   btn.disabled = false; btn.textContent = 'Create key';
 }
+
+/* ---------------- instant bottom-nav tabs (v4) ----------------
+   The three tabs (Servers / Search / Settings) switch WITHOUT a full
+   page reload: the target page's <main> is fetched (or taken from a
+   prefetch cache) and swapped in, then the page's init runs. Data still
+   comes from the 60s cache with a quiet background refresh — so a tab
+   switch is instant. Any fetch failure falls back to a normal load. */
+function prefetchTab(url) {
+  if (NAV_CACHE[url]) return;
+  fetch(url, {credentials: 'same-origin'}).then(r => {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.text();
+  }).then(html => {
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const main = doc.querySelector('main');
+    if (main) NAV_CACHE[url] = {title: doc.title, html: main.innerHTML};
+  }).catch(() => { /* prefetch is best-effort; the click will fetch */ });
+}
+function swapMain(url, data, push) {
+  const main = document.querySelector('main');
+  if (!main) return false;
+  // v4: the renderers skip DOM writes when the HTML is unchanged — but a
+  // tab swap replaces the DOM with the template's spinner HTML, so the
+  // "unchanged" cache is stale here and must be reset.
+  lastServersHtml = null; lastExpiringHtml = null;
+  main.innerHTML = data.html;
+  document.title = data.title;
+  const tab = url === '/settings' ? 'settings' : 'servers';
+  document.querySelectorAll('nav.bottom a[data-tab]').forEach(a => {
+    a.classList.toggle('on', a.dataset.tab === tab);
+  });
+  if (push) history.pushState({tab: url}, '', url);
+  if (url === '/settings') initSettings(); else initDashboard();
+  window.scrollTo(0, 0);
+  return true;
+}
+async function goTab(url, push) {
+  if (NAV_CACHE[url]) { swapMain(url, NAV_CACHE[url], push !== false); return; }
+  try {
+    const r = await fetch(url, {credentials: 'same-origin'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+    const main = doc.querySelector('main');
+    if (!main) throw new Error('no main');
+    NAV_CACHE[url] = {title: doc.title, html: main.innerHTML};
+    swapMain(url, NAV_CACHE[url], push !== false);
+  } catch (e) { location.href = url; }
+}
+function navTab(link, ev) {
+  ev.preventDefault();
+  const href = link.getAttribute('href');
+  if (href.indexOf('#search') !== -1) {
+    // Search tab: focus the dashboard search box (load the dashboard
+    // first if we are on another tab).
+    const q = document.getElementById('q');
+    if (q) {
+      q.focus();
+      q.scrollIntoView({behavior: 'smooth', block: 'start'});
+      history.replaceState(null, '', '/dashboard#search');
+    } else {
+      goTab('/dashboard').then(() => {
+        const q2 = document.getElementById('q');
+        if (q2) { q2.focus(); q2.scrollIntoView({behavior: 'smooth'}); }
+      });
+    }
+    return false;
+  }
+  const path = href.split('#')[0] || '/dashboard';
+  if (location.pathname === path || (path === '/dashboard' && location.pathname === '/')) {
+    window.scrollTo({top: 0, behavior: 'smooth'});
+    return false;
+  }
+  goTab(path);
+  return false;
+}
+window.addEventListener('popstate', () => {
+  const path = location.pathname;
+  if (path === '/settings' || path === '/dashboard' || path === '/') {
+    goTab(path === '/' ? '/dashboard' : path, false);
+  }
+});
 
 /* ---------------- settings ---------------- */
 async function loadSettings() {
@@ -538,9 +856,14 @@ async function loadSettings() {
     const el = document.getElementById('settings-list');
     if (!j.servers.length) { el.innerHTML = '<div class="empty">No servers yet.</div>'; return; }
     el.innerHTML = j.servers.map(s =>
-      '<div class="card"><div class="row"><div class="grow">' +
-      '<b style="font-size:17px">' + esc(s.name) + '</b> ' +
-      '<span class="muted small">' + esc(s.type === 'xui' ? '3X-UI' : 'Marzban') + ' • ' + esc(s.country || '') + '</span>' +
+      // v4: flag tile + FREE/SALES badges on every row, cleaner layout
+      '<div class="card"><div class="row">' +
+      '<span class="flag-sm">' + flagSVG(s.country) + '</span>' +
+      '<div class="grow">' +
+      '<b style="font-size:17px">' + esc(s.name) + '</b>' +
+      (s.is_free ? '<span class="badge-free">FREE</span>' : '') +
+      (s.is_sales ? '<span class="badge-sales">SALES</span>' : '') +
+      '<div class="muted small">' + esc(s.type === 'xui' ? '3X-UI' : 'Marzban') + ' • ' + esc(countryName(s.country)) + '</div>' +
       '<div class="muted small">' + esc(s.base_url) + '</div></div></div>' +
       '<div class="row" style="margin-top:12px">' +
       '<button class="btn ghost" onclick="editServer(' + s.id + ')">Edit</button>' +
