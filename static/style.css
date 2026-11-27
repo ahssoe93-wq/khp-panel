@@ -504,7 +504,10 @@ h2.sec-expired { color: #fff; background: var(--red); }
 .person-body { padding: 0 4px 8px; }
 /* server page: bigger blue "← All servers" back link */
 .back-link { margin-bottom: 12px; }
-.back-link a { color: #38bdf8; font-size: 26px; font-weight: 800; }
+.back-link a { display: inline-flex; align-items: center; gap: 4px; color: #38bdf8; font-size: 26px; font-weight: 800; }
+/* v6.1.1: the arrow is a real 30px SVG (the old ← text glyph rendered
+   small and thin) — same blue #38BDF8 as the text. */
+.back-link svg.back-arrow { width: 30px; height: 30px; flex: none; }
 /* Bulk Create button: blue outline, next to the green + Add Key */
 .btn.bulk-btn {
   background: transparent; color: #38bdf8;
@@ -537,3 +540,13 @@ h2.sec-expired { color: #fff; background: var(--red); }
 nav.bottom a.nav-settings { color: #a855f7; }
 nav.bottom a.on.nav-settings { background: #a855f7; color: #fff; }
 nav.bottom a.on { box-shadow: 0 0 0 2px #fff; }
+
+/* ---- v6.1.1 ---- */
+/* bottom nav (DEFECT 2): ALL THREE tabs are always solid-filled pills
+   (Servers green, Search blue, Settings purple) — before, only the
+   .on tab was filled and Search/Settings were coloured text only.
+   The white ring still marks the active tab. These rules sit last so
+   they win over the colour-only rules above at equal specificity. */
+nav.bottom a.nav-servers { background: var(--emerald); color: var(--bg); }
+nav.bottom a.nav-search { background: #38bdf8; color: var(--bg); }
+nav.bottom a.nav-settings { background: #a855f7; color: #fff; }
