@@ -8,7 +8,7 @@
 </head>
 <body>
 <header>
-  <div class="logo">K</div>
+  <img class="logo-img" src="{{ url_for('static', filename='logo.png') }}" alt="KHP">
   <div>
     <h1>KHP PANEL</h1>
     <div class="sub">Own VPN Panel</div>
@@ -29,6 +29,21 @@
 </nav>
 {% endif %}
 <div id="toast"></div>
+<!-- shared key-action modal (Renew / Edit GB), used by dashboard + server page -->
+<div class="modal-back" id="action-modal">
+  <div class="modal">
+    <h3 id="action-title">Key action</h3>
+    <div id="action-body"></div>
+    <div id="action-result" style="display:none">
+      <p class="muted">Done: <b id="action-result-name" style="color:var(--text)"></b></p>
+      <div class="linkbox" id="action-result-link" style="display:none"></div>
+      <button class="btn block" id="action-copy-btn" style="display:none"
+        onclick="copyText(document.getElementById('action-result-link').textContent, 'Link copied')">Copy link</button>
+      <div style="height:10px"></div>
+      <button class="btn ghost block" onclick="closeActionModal()">Done</button>
+    </div>
+  </div>
+</div>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 {% block scripts %}{% endblock %}
 </body>
