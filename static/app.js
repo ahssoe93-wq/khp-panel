@@ -38,7 +38,7 @@ let EXP_LOADED = false;
 // v4: "Expiring soon" starts COLLAPSED (tap the header to show). The
 // choice is remembered on this device.
 let EXP_COLLAPSED = localStorage.getItem('khp_exp_collapsed') !== '0';
-let COLLAPSED = new Set();
+let EXPANDED = new Set(); // v5: country groups start COLLAPSED on login — tap a country to expand
 let CHECKED_AT = 0;
 let DASH_TIMER = null; // 60s quiet auto-refresh timer (cleared on tab switch)
 let NAV_CACHE = {}; // prefetched tab HTML, for instant tab switching
@@ -57,6 +57,7 @@ try {
     CHECKED_AT = _s.checkedAt || 0;
     EXPIRING = _s.expiring || [];
     EXP_LOADED = !!_s.expLoaded;
+    EXPANDED = new Set(_s.expanded || []);
     EXP_COUNTS = {};
     EXPIRING.forEach(c => { EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1; });
   }
@@ -65,7 +66,8 @@ function persistTabCache() {
   try {
     sessionStorage.setItem('khp_nav_cache_v1', JSON.stringify({
       nav: NAV_CACHE, servers: SERVERS, health: HEALTH,
-      checkedAt: CHECKED_AT, expiring: EXPIRING, expLoaded: EXP_LOADED}));
+      checkedAt: CHECKED_AT, expiring: EXPIRING, expLoaded: EXP_LOADED,
+      expanded: [...EXPANDED]}));
   } catch (e) { /* ignore */ }
 }
 const COUNTRY_ORDER = ['Singapore', 'Japan', 'Thailand'];
@@ -249,7 +251,7 @@ function renderServers() {
   });
   const html = order.map(g => {
     const items = groups[g];
-    const collapsed = COLLAPSED.has(g);
+    const collapsed = !EXPANDED.has(g);
     const chev = collapsed ? '▼' : '▲';
     let html = '<div class="group-h" onclick="toggleGroup(\'' + esc(g) + '\')">' +
       '<span class="gflag">' + flagFor(g === 'Other' ? '' : g) + '</span>' +
@@ -299,8 +301,11 @@ function renderServers() {
   if (lastServersHtml !== html) { el.innerHTML = html; lastServersHtml = html; }
 }
 function toggleGroup(g) {
-  if (COLLAPSED.has(g)) COLLAPSED.delete(g); else COLLAPSED.add(g);
+  if (EXPANDED.has(g)) EXPANDED.delete(g); else EXPANDED.add(g);
   renderServers();
+  // v5: persist the choice at once, so the expanded group survives a
+  // server-page visit and the return shows it straight away.
+  snapshotTab('/dashboard');
 }
 function filterServers() { renderServers(); }
 /* v4: "Expiring soon" is collapsible (default collapsed). The header
@@ -815,6 +820,13 @@ function prefetchTab(url) {
 function snapshotTab(url) {
   const main = document.querySelector('main');
   if (!main) return;
+  // v5: never overwrite a good dashboard snapshot with one whose stats
+  // are still "–" (a slow/failed health fetch on first load) — that is
+  // how the stat boxes once showed blank after a restore.
+  if (url === '/dashboard') {
+    const s = document.getElementById('stat-servers');
+    if (s && s.textContent.trim() === '–' && NAV_CACHE['/dashboard'] && NAV_CACHE['/dashboard'].populated) return;
+  }
   const q = document.getElementById('q');
   const sf = document.getElementById('server-filter');
   NAV_CACHE[url] = {title: document.title, html: main.innerHTML, populated: true,
