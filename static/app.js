@@ -36,12 +36,42 @@ let SERVERS = [], HEALTH = {};
 let EXPIRING = [], EXPIRING_ALL = false, EXP_COUNTS = {};
 let COLLAPSED = new Set();
 let CHECKED_AT = 0;
-const FLAG_EMOJI = {singapore: '🇸🇬', thailand: '🇹🇭', japan: '🇯🇵'};
 const COUNTRY_ORDER = ['Singapore', 'Japan', 'Thailand'];
-function flagFor(country) {
-  const c = (country || '').toLowerCase();
-  return FLAG_EMOJI[c] || (country || '??').slice(0, 2).toUpperCase();
+/* Inline SVG country flags (v3) — drawn shapes, NO emoji font needed.
+   Emoji flags rendered as plain "SG"/"TH"/"JP" letters on the user's
+   phone, so flags are real graphics now. Same three SVGs as in
+   templates/flags.html — keep them in sync. */
+function starPoints(cx, cy, rO, rI) {
+  const pts = [];
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 === 0 ? rO : rI;
+    const a = -Math.PI / 2 + i * Math.PI / 5;
+    pts.push((cx + r * Math.cos(a)).toFixed(1) + ',' + (cy + r * Math.sin(a)).toFixed(1));
+  }
+  return pts.join(' ');
 }
+function flagSVG(country) {
+  const c = (country || '').toLowerCase();
+  const open = '<svg class="flag-svg" viewBox="0 0 60 40" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">';
+  if (c === 'singapore') {
+    const stars = [[24, 4.5], [29.2, 8.3], [27.2, 14.5], [20.8, 14.5], [18.8, 8.3]]
+      .map(([x, y]) => '<polygon points="' + starPoints(x, y, 2.3, 0.95) + '" fill="#fff"/>').join('');
+    return open + '<rect width="60" height="20" fill="#ef3340"/><rect y="20" width="60" height="20" fill="#fff"/>' +
+      '<circle cx="12" cy="10" r="8" fill="#fff"/><circle cx="16" cy="10" r="6.8" fill="#ef3340"/>' + stars + '</svg>';
+  }
+  if (c === 'thailand') {
+    return open + '<rect width="60" height="40" fill="#ef3340"/>' +
+      '<rect y="6.7" width="60" height="6.6" fill="#fff"/>' +
+      '<rect y="13.3" width="60" height="13.4" fill="#241d4f"/>' +
+      '<rect y="26.7" width="60" height="6.6" fill="#fff"/></svg>';
+  }
+  if (c === 'japan') {
+    return open + '<rect width="60" height="40" fill="#fff"/>' +
+      '<circle cx="30" cy="20" r="12" fill="#bc002d"/></svg>';
+  }
+  return (country || '??').slice(0, 2).toUpperCase();
+}
+function flagFor(country) { return flagSVG(country); }
 function fmtGB(n) {
   if (!n) return '0 GB';
   return Math.round(n / 1073741824).toLocaleString('en-US') + ' GB';
@@ -153,20 +183,24 @@ function renderServers() {
       if (online === false) {
         const seen = h.last_seen ? 'last seen ' + fmtTime(h.last_seen) : 'never seen';
         return '<div class="server down">' +
-          '<div class="flag flag-emoji">' + flagFor(s.country) + '</div>' +
+          '<div class="flag">' + flagFor(s.country) + '</div>' +
           '<div class="grow"><b style="font-size:18px">' + esc(s.name) +
           '<span class="badge-down">DOWN</span></b>' +
           '<div class="muted small">' + (s.type === 'xui' ? '3X-UI' : 'Marzban') + ' • ' + h.clients + ' clients</div></div>' +
           '<div class="used"><span class="dot off"></span><div class="muted small" style="color:var(--red)">' + seen + '</div></div>' +
           '<button class="keybtn" style="background:transparent;color:var(--red);border:1px solid var(--red)" onclick="event.stopPropagation();retryServer(' + s.id + ', this)">Retry</button></div>';
       }
+      // usage bar (v3): real numbers — used vs sum of clients' GB limits
+      const pct = (h && h.online && h.limit) ? Math.min(100, Math.round(h.used * 100 / h.limit)) : 0;
+      const bar = (h && h.online && h.limit)
+        ? '<div class="serverbar"><i style="width:' + pct + '%"></i></div>' : '';
       return '<div class="server" onclick="location.href=\'/server/' + s.id + '\'">' +
-        '<div class="flag flag-emoji">' + flagFor(s.country) + '</div>' +
+        '<div class="flag">' + flagFor(s.country) + '</div>' +
         '<div class="grow"><b style="font-size:18px">' + esc(s.name) + badges + '</b>' +
         '<div class="muted small">' + sub + '</div></div>' +
         '<div class="used"><span class="dot ' + dot + '"></span>' +
         (h && h.online ? '<div class="muted small">' + fmtGB(h.used) + '</div>' : '') + '</div>' +
-        '<button class="keybtn" onclick="event.stopPropagation();location.href=\'/server/' + s.id + '#add\'">+ Key</button></div>';
+        '<button class="keybtn" onclick="event.stopPropagation();location.href=\'/server/' + s.id + '#add\'">+ Key</button>' + bar + '</div>';
     }).join('');
     return html;
   }).join('');
@@ -189,6 +223,7 @@ function renderExpiring() {
     '<div class="actions">' +
     '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\')">Renew</button>' +
     '<button class="btn ghost sm" onclick="swapKey(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this)">Swap</button>' +
+    '<button class="btn ghost sm" onclick="openEditModal(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', ' + Math.round((c.limit || 0) / 1073741824) + ', \'' + nameDateISO(c.name) + '\')">Edit</button>' +
     '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this)">Copy link</button>' +
     '</div></div>'
   ).join('') + (!EXPIRING_ALL && EXPIRING.length > 5
@@ -281,7 +316,7 @@ function renderClients() {
       '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + n + '\')">Renew</button>' +
       '<button class="btn ghost sm" onclick="swapKey(' + c.server_id + ', \'' + n + '\', this)">Swap</button>' +
       '<button class="btn ghost sm" onclick="toggleKey(' + c.server_id + ', \'' + n + '\', ' + (!c.enable) + ', this)">' + toggleLabel + '</button>' +
-      '<button class="btn ghost sm" onclick="openGbModal(' + c.server_id + ', \'' + n + '\')">Edit GB</button>' +
+      '<button class="btn ghost sm" onclick="openEditModal(' + c.server_id + ', \'' + n + '\')">Edit</button>' +
       '<button class="btn ghost sm red" onclick="deleteKey(' + c.server_id + ', \'' + n + '\', this)">Delete</button>' +
       '</div></div>';
     }).join('');
@@ -403,28 +438,62 @@ async function submitRenew(serverId, name, months, btn) {
   } catch (e) { toast('Renew failed: ' + e.message); }
   btn.disabled = false;
 }
-function openGbModal(serverId, name) {
-  openActionModal('Edit GB — ' + name,
-    '<p class="muted">Change the key\u2019s GB limit. Used traffic is kept.</p>' +
-    '<div style="height:12px"></div>' +
-    '<div class="seg">' +
-    [400, 500, 1000, 1500].map(gb =>
-      '<button type="button" onclick="submitGb(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', ' + gb + ', this)">' + gb + ' GB</button>'
-    ).join('') +
-    '</div><div style="height:10px"></div>' +
-    '<button class="btn ghost block" onclick="closeActionModal()">Cancel</button>');
+/* ---------- Edit key (v3): custom GB + custom expiry date ---------- */
+function nameDateISO(name) {
+  // Name__D_M_YYYY -> YYYY-MM-DD for the date input.
+  const m = (name || '').match(/__(\d{1,2})[_-](\d{1,2})[_-](\d{4})$/);
+  if (!m) return '';
+  return m[3] + '-' + m[2].padStart(2, '0') + '-' + m[1].padStart(2, '0');
 }
-async function submitGb(serverId, name, gb, btn) {
-  btn.disabled = true;
+function openEditModal(serverId, name, gbPrefill, datePrefill) {
+  let gbVal = gbPrefill, dateVal = datePrefill;
+  if (gbVal == null || !dateVal) {
+    const c = (typeof ALL_CLIENTS !== 'undefined')
+      ? ALL_CLIENTS.find(x => x.name === name) : null;
+    if (c) {
+      if (gbVal == null) gbVal = Math.round((c.limit || 0) / 1073741824) || 400;
+      if (!dateVal) dateVal = nameDateISO(name);
+    }
+  }
+  if (gbVal == null) gbVal = 400;
+  if (!dateVal) dateVal = '';
+  openActionModal('Edit key — ' + name,
+    '<p class="muted">GB can be any number. A new expiry date renames the key to that date; used traffic is kept.</p>' +
+    '<div style="height:12px"></div>' +
+    '<label>GB limit</label>' +
+    '<input id="edit-gb" type="number" min="1" step="1" value="' + gbVal + '">' +
+    '<div class="seg" style="margin:8px 0 14px">' +
+    [400, 500, 1000, 1500].map(gb =>
+      '<button type="button" onclick="document.getElementById(\'edit-gb\').value=' + gb + '">' + gb + ' GB</button>'
+    ).join('') + '</div>' +
+    '<label>Expiry date</label>' +
+    '<input id="edit-date" type="date" value="' + dateVal + '">' +
+    '<div style="height:12px"></div>' +
+    '<div class="row"><button class="btn" id="edit-save" style="flex:1" onclick="submitEdit(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', this)">Save changes</button>' +
+    '<button class="btn ghost" style="flex:1" onclick="closeActionModal()">Cancel</button></div>');
+}
+async function submitEdit(serverId, name, btn) {
+  const gbRaw = document.getElementById('edit-gb').value;
+  const dateRaw = document.getElementById('edit-date').value;
+  const gb = parseFloat(gbRaw);
+  const body = {};
+  if (gbRaw !== '' && !isNaN(gb) && gb > 0) body.gb = gb;
+  if (dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw)) body.expiry_date = dateRaw;
+  if (!body.gb && !body.expiry_date) { toast('Change the GB or the date first'); return; }
+  btn.disabled = true; btn.textContent = 'Saving…';
   try {
-    await api('/api/server/' + serverId + '/clients/' + encodeURIComponent(name) + '/gb',
+    const j = await api('/api/server/' + serverId + '/clients/' + encodeURIComponent(name) + '/edit',
       {method: 'POST', headers: {'Content-Type': 'application/json'},
-       body: JSON.stringify({gb})});
-    toast(name + ' → ' + gb + ' GB');
-    closeActionModal();
+       body: JSON.stringify(body)});
+    if (j.name && j.name !== name) {
+      showActionResult(j.name, j.link, 'edited • ' + j.gb + ' GB • exp ' + j.expiry_h);
+    } else {
+      toast('Updated • ' + j.gb + ' GB • exp ' + j.expiry_h);
+      closeActionModal();
+    }
     refreshAfterAction();
   } catch (e) { toast('Failed: ' + e.message); }
-  btn.disabled = false;
+  btn.disabled = false; btn.textContent = 'Save changes';
 }
 function openAddKey() {
   document.getElementById('add-form').style.display = '';
