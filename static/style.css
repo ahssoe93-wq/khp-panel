@@ -235,3 +235,87 @@ nav.bottom a.on { color: var(--emerald); font-weight: 700; }
   .modal-back { align-items: center; }
   .modal { border-radius: 20px; border-bottom: 1px solid var(--border); }
 }
+
+/* ---- v2 ---- */
+.logo-img { width: 44px; height: 44px; flex: none; border-radius: 12px; }
+.badge-sales {
+  background: var(--emerald); color: var(--bg);
+  font-size: 11px; font-weight: 800;
+  border-radius: 12px; padding: 2px 8px;
+  vertical-align: middle; margin-left: 6px;
+}
+.badge-down {
+  background: var(--red); color: #fff;
+  font-size: 11px; font-weight: 800;
+  border-radius: 12px; padding: 2px 8px;
+  vertical-align: middle; margin-left: 6px;
+}
+.flag-emoji { font-size: 26px; background: var(--surface2); }
+.server.down { border-color: var(--red); }
+.server.down:hover { border-color: var(--red); }
+.exp-count { color: var(--red); font-weight: 700; }
+
+/* down-server alert banner */
+.alert-banner {
+  background: rgba(239,68,68,.15);
+  border: 1px solid var(--red);
+  border-radius: 16px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  display: flex; align-items: center; gap: 12px;
+}
+.alert-banner .warn {
+  width: 30px; height: 30px; flex: none;
+  background: var(--red); color: #fff; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 18px;
+}
+.alert-banner b { font-size: 17px; }
+.alert-banner .sub { color: #fca5a5; font-size: 13px; }
+.alert-banner .retry {
+  margin-left: auto; flex: none;
+  background: transparent; color: #fff;
+  border: 1px solid var(--red); border-radius: 20px;
+  padding: 7px 16px; font-size: 15px; font-weight: 700;
+}
+.stat.down { border-color: var(--red); }
+.stat.down b { color: var(--red); }
+
+/* country groups on the dashboard */
+.group-h {
+  display: flex; align-items: center; gap: 10px;
+  margin: 18px 0 10px; cursor: pointer; user-select: none;
+}
+.group-h .gflag { font-size: 28px; line-height: 1; }
+.group-h b { font-size: 18px; }
+.group-h .chev { margin-left: auto; color: var(--muted); font-size: 14px; }
+.server .keybtn {
+  flex: none;
+  background: var(--emerald); color: var(--bg);
+  border: none; border-radius: 20px;
+  padding: 8px 14px; font-size: 14px; font-weight: 700;
+}
+.server .used { text-align: right; flex: none; }
+.see-all {
+  display: block; width: 100%;
+  background: transparent; color: var(--emerald);
+  border: 1px solid var(--border); border-radius: 24px;
+  padding: 12px; font-size: 16px; font-weight: 700; margin-bottom: 6px;
+}
+
+/* sort / filter chips */
+.chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: center; }
+.chip-btn {
+  padding: 8px 16px; border-radius: 20px;
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--border); font-size: 15px; font-weight: 700;
+}
+.chip-btn.sel { background: var(--emerald); color: var(--bg); border-color: var(--emerald); }
+.chip-btn.sel.blue { background: #38bdf8; border-color: #38bdf8; }
+
+/* per-key action buttons */
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.btn.sm { padding: 7px 14px; font-size: 14px; border-radius: 18px; }
+.btn.sm.red { color: var(--red); border-color: rgba(239,68,68,.5); }
+.client.expiring-today { border-color: var(--red); }
+.client .name-row { display: flex; align-items: center; gap: 8px; }
