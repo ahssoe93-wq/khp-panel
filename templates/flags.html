@@ -1,0 +1,16 @@
+{# Inline SVG country flags (v3) — drawn shapes, NO emoji font needed.
+   Emoji flags (🇸🇬🇹🇭🇯🇵) render as plain "SG"/"TH"/"JP" letters on the
+   user's phone, so flags are real graphics now. viewBox 60x40 (3:2).
+   The same three SVGs live in static/app.js flagSVG() — keep them in sync. #}
+{% macro flag(country) -%}
+{% set c = (country or '').lower() %}
+{% if c == 'singapore' %}
+<svg class="flag-svg" viewBox="0 0 60 40" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect width="60" height="20" fill="#ef3340"/><rect y="20" width="60" height="20" fill="#fff"/><circle cx="12" cy="10" r="8" fill="#fff"/><circle cx="16" cy="10" r="6.8" fill="#ef3340"/><polygon points="24.0,2.2 24.6,3.7 26.2,3.8 24.9,4.8 25.4,6.4 24.0,5.5 22.6,6.4 23.1,4.8 21.8,3.8 23.4,3.7" fill="#fff"/><polygon points="29.2,6.0 29.8,7.5 31.4,7.6 30.1,8.6 30.6,10.2 29.2,9.2 27.8,10.2 28.3,8.6 27.0,7.6 28.6,7.5" fill="#fff"/><polygon points="27.2,12.2 27.8,13.7 29.4,13.8 28.1,14.8 28.6,16.4 27.2,15.4 25.8,16.4 26.3,14.8 25.0,13.8 26.6,13.7" fill="#fff"/><polygon points="20.8,12.2 21.4,13.7 23.0,13.8 21.7,14.8 22.2,16.4 20.8,15.4 19.4,16.4 19.9,14.8 18.6,13.8 20.2,13.7" fill="#fff"/><polygon points="18.8,6.0 19.4,7.5 21.0,7.6 19.7,8.6 20.2,10.2 18.8,9.2 17.4,10.2 17.9,8.6 16.6,7.6 18.2,7.5" fill="#fff"/></svg>
+{% elif c == 'thailand' %}
+<svg class="flag-svg" viewBox="0 0 60 40" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect width="60" height="40" fill="#ef3340"/><rect y="6.7" width="60" height="6.6" fill="#fff"/><rect y="13.3" width="60" height="13.4" fill="#241d4f"/><rect y="26.7" width="60" height="6.6" fill="#fff"/></svg>
+{% elif c == 'japan' %}
+<svg class="flag-svg" viewBox="0 0 60 40" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect width="60" height="40" fill="#fff"/><circle cx="30" cy="20" r="12" fill="#bc002d"/></svg>
+{% else %}
+{{ (country or '??')[:2].upper() }}
+{% endif %}
+{%- endmacro %}
