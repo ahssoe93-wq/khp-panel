@@ -371,6 +371,24 @@ class XuiClient:
             pass
         return None
 
+    def client_ips(self, email):
+        """v6.1.3: distinct IPs a client has connected from, from POST
+        /panel/api/clients/ips/{email} (GET 404s — POST only). Returns
+        {"count": n, "ips": [...]} or None when the endpoint cannot be
+        read. The panel answers {"success": true, "obj": ["IP
+        (YYYY-MM-DD HH:MM:SS)", ...]} — the IP is the first token."""
+        try:
+            r = self._request("POST", "/panel/api/clients/ips/" +
+                              urllib.parse.quote(email))
+            data = r.json()
+            obj = data.get("obj") if isinstance(data, dict) else None
+            if not isinstance(obj, list):
+                return None
+            ips = sorted({str(e).split()[0] for e in obj if str(e).split()})
+            return {"count": len(ips), "ips": ips}
+        except Exception:
+            return None
+
     def list_vless_clients(self):
         """VLESS clients, deduped by UUID across all vless inbounds.
         One customer key = the SAME UUID client on every vless inbound
