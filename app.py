@@ -1133,6 +1133,12 @@ def api_key_overview():
         sections inside each owner/channel group from its own bucket, so
         a section header count is that owner's TRUE total and agrees
         with the stat cards; each list is capped at 100 rows.
+      per_server_online (v6.1.4): server_id -> keys connected right
+        now on THAT server, counted from the same scan with the same
+        per-client check as stats["online"] (so the per-server counts
+        sum to stats["online"]); null when that server's scan failed
+        (down/unreachable) — the client never shows a fake number.
+        A reseller's map covers only their own servers.
       total (v6.1.2): the same three lists MERGED across all visible
         servers (the admin's 54; a reseller's own servers only), same
         sort orders, same 100-row cap; totals are the TRUE global
@@ -1177,10 +1183,10 @@ def api_key_overview():
                     online = client.online_emails()
                 except Exception:  # noqa: BLE001
                     online = None
-                return clients, online
-            return client.list_users(), None
+                return clients, online, True
+            return client.list_users(), None, True
         except Exception:  # noqa: BLE001
-            return [], None
+            return [], None, False
 
     def bucket(buckets, owner):
         return buckets.setdefault(
@@ -1191,16 +1197,20 @@ def api_key_overview():
     total = 0
     n_online = 0
     n_expiring = n_low = n_expired = 0
+    per_server_online = {}
     buckets = {}
     with ThreadPoolExecutor(max_workers=6) as pool:
-        for full, (clients, online) in zip(servers, pool.map(scan, servers)):
+        for full, (clients, online, ok) in zip(
+                servers, pool.map(scan, servers)):
             created = created_maps[full["id"]]
             b = bucket(buckets, full["owner"])
+            n_server_online = 0
             for c in clients:
                 total += 1
                 if c.get("online") is True or (
                         online is not None and c.get("name") in online):
                     n_online += 1
+                    n_server_online += 1
                 exp = c.get("expiry") or 0
                 used = c.get("used") or 0
                 limit = c.get("limit") or 0
@@ -1237,6 +1247,10 @@ def api_key_overview():
                     pc["remaining"] = limit - used
                     pc["remaining_h"] = fmt_gb(limit - used)
                     b["low_gb"].append(pc)
+            # v6.1.4: per-server online count from the same scan; null
+            # when the scan failed (server down) — never a fake number.
+            per_server_online[full["id"]] = (
+                n_server_online if ok else None)
     by_owner = {}
     for owner, b in buckets.items():
         b["expiring"].sort(key=lambda r: r["expiry"])
@@ -1269,6 +1283,8 @@ def api_key_overview():
                "stats": {"total": total, "active": active,
                          "expiring_3d": n_expiring, "low_gb": n_low,
                          "expired": n_expired, "online": n_online},
+               "per_server_online": {str(k): v
+                                     for k, v in per_server_online.items()},
                "by_owner": by_owner,
                "total": total_bucket}
     OVERVIEW_CACHE[owner_key()] = [now, payload]
