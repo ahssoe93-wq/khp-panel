@@ -21,7 +21,9 @@ For automated testing only, KHP_PANEL_ADMIN_PASSWORD env var sets the
 admin password on first run — do NOT use it in production.
 """
 import base64
+import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -32,8 +34,8 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
-from flask import (Flask, abort, g, jsonify, redirect, render_template,
-                   request, session, url_for)
+from flask import (Flask, Response, abort, g, jsonify, redirect,
+                   render_template, request, session, url_for)
 
 from panels import (GB_BYTES, MM, MONTHS_GB, PanelError, add_months,
                     client_status, expiry_for, fmt_gb, make_client)
@@ -1120,7 +1122,11 @@ def api_key_overview():
     stats + the three key lists in a single pass (replaces the old
     7-day /api/expiring scan for the dashboard):
       stats: active keys, keys expiring within 3 days, expired keys
-        (TRUE totals across all visible servers — feeds the 4 stat cards).
+        (TRUE totals across all visible servers — feeds the 4 stat cards),
+        plus "online" (v6.1.3): keys connected right now, counted from
+        the same scan (3X-UI onlines endpoint / Marzban online_at) —
+        feeds the "Online now" strip. A reseller's stats cover only
+        their own servers, like everything else in this payload.
       by_owner: owner -> {totals, expiring, low_gb, expired} — the same
         three lists SCOPED to one owner (the Super Admin's own servers,
         or one reseller's servers). The dashboard renders the three
@@ -1152,10 +1158,29 @@ def api_key_overview():
     created_maps = {s["id"]: created_map(s["id"]) for s in servers}
 
     def scan(full):
+        # v6.1.3: one client per server — the client list plus, for
+        # 3X-UI, the currently-connected emails (one extra POST in the
+        # same worker thread; Marzban users already carry "online"
+        # from online_at). Feeds stats["online"] with no extra browser
+        # requests; the whole payload is cached 60s like before.
         try:
-            return server_all_clients(full)
+            client = make_client(full)
+            if full["type"] == "xui":
+                clients = []
+                for c in client.list_clients():
+                    c["protocol"] = "outline"
+                    clients.append(c)
+                for c in client.list_vless_clients():
+                    c["protocol"] = "vless"
+                    clients.append(c)
+                try:
+                    online = client.online_emails()
+                except Exception:  # noqa: BLE001
+                    online = None
+                return clients, online
+            return client.list_users(), None
         except Exception:  # noqa: BLE001
-            return []
+            return [], None
 
     def bucket(buckets, owner):
         return buckets.setdefault(
@@ -1164,14 +1189,18 @@ def api_key_overview():
 
     active = 0
     total = 0
+    n_online = 0
     n_expiring = n_low = n_expired = 0
     buckets = {}
     with ThreadPoolExecutor(max_workers=6) as pool:
-        for full, clients in zip(servers, pool.map(scan, servers)):
+        for full, (clients, online) in zip(servers, pool.map(scan, servers)):
             created = created_maps[full["id"]]
             b = bucket(buckets, full["owner"])
             for c in clients:
                 total += 1
+                if c.get("online") is True or (
+                        online is not None and c.get("name") in online):
+                    n_online += 1
                 exp = c.get("expiry") or 0
                 used = c.get("used") or 0
                 limit = c.get("limit") or 0
@@ -1239,7 +1268,7 @@ def api_key_overview():
     payload = {"ok": True,
                "stats": {"total": total, "active": active,
                          "expiring_3d": n_expiring, "low_gb": n_low,
-                         "expired": n_expired},
+                         "expired": n_expired, "online": n_online},
                "by_owner": by_owner,
                "total": total_bucket}
     OVERVIEW_CACHE[owner_key()] = [now, payload]
@@ -1615,6 +1644,158 @@ def api_bulk_delete_key(server_id):
     HEALTH_CACHE.pop(server_id, None)
     invalidate_overview()  # v6.1.2: keep dashboard sections from resurrecting deleted rows
     return jsonify({"ok": True, "deleted": deleted, "failed": failed})
+
+
+@app.route("/api/server/<int:server_id>/bulk-renew-key", methods=["POST"])
+@login_required
+def api_bulk_renew_key(server_id):
+    """v6.1.3: renew several EXPIRING keys at once. Body:
+    {"items": [{"name": ..., "protocol": "outline"|"vless"}],
+    "months": 1|2|3}. Reuses the single-renew semantics per key (new
+    expiry = old + 30/60/90 days, key RENAMED to the new date, GB
+    unchanged; Marzban renew = DELETE+RECREATE). The UI asks for
+    confirmation with the count + months before calling this.
+    Per-key failures are reported in "failed" — the rest still renew.
+    Returns {"renewed": [{old_name, name, expiry, expiry_h, gb,
+    months}], "failed": [{name, error}]}."""
+    server, err = _owned_server(server_id)
+    if err:
+        return err
+    data = request.get_json(force=True, silent=True) or {}
+    months = int(data.get("months") or 1)
+    if months not in (1, 2, 3):
+        return jsonify({"ok": False, "error": "months must be 1, 2 or 3"}), 400
+    items = data.get("items") or data.get("names") or []
+    if not isinstance(items, list) or not items or len(items) > 100:
+        return jsonify({"ok": False,
+                        "error": "items must be a list of 1..100 keys"}), 400
+    try:
+        client = make_client(server)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 502
+    renewed, failed = [], []
+    for it in items:
+        if isinstance(it, dict):
+            name = (it.get("name") or "").strip()
+            proto = (it.get("protocol") or "outline").strip().lower()
+        else:
+            name, proto = str(it).strip(), "outline"
+        if not name:
+            failed.append({"name": name, "error": "empty name"})
+            continue
+        try:
+            if server["type"] == "marzban":
+                rec, new_name = client.renew_user(name, months)
+            elif proto == "vless":
+                rec, new_name = client.renew_vless_client(name, months)
+            else:
+                rec, new_name = client.renew_client(name, months)
+            if new_name != name:
+                note_key_renamed(server_id, name, new_name)
+            renewed.append({
+                "old_name": name, "name": new_name,
+                "expiry": rec.get("expiry") or 0,
+                "expiry_h": (datetime.fromtimestamp(rec["expiry"], MM)
+                             .strftime("%d %b %Y") if rec.get("expiry")
+                             else "never"),
+                "gb": int((rec.get("limit") or 0) // 1073741824),
+                "months": months})
+        except Exception as exc:  # noqa: BLE001
+            failed.append({"name": name, "error": str(exc)[:120]})
+    HEALTH_CACHE.pop(server_id, None)
+    invalidate_overview()  # renewed keys leave the expiring lists
+    return jsonify({"ok": True, "renewed": renewed, "failed": failed})
+
+
+@app.route("/api/server/<int:server_id>/key-ips", methods=["POST"])
+@login_required
+def api_key_ips(server_id):
+    """v6.1.3: distinct-IP counts for up to 100 keys, for the
+    key-sharing flag. Body: {"names": [...]}. 3X-UI only — Marzban
+    has no IP log API, so it answers supported=false and the UI says
+    so. The panel is fanned out to with 5 workers; a per-key failure
+    reports count null (unknown), never 0."""
+    server, err = _owned_server(server_id)
+    if err:
+        return err
+    if server["type"] != "xui":
+        return jsonify({"ok": True, "supported": False, "counts": {}})
+    data = request.get_json(force=True, silent=True) or {}
+    names = data.get("names") or []
+    if not isinstance(names, list) or not names or len(names) > 100:
+        return jsonify({"ok": False,
+                        "error": "names must be a list of 1..100 keys"}), 400
+    names = [str(n).strip() for n in names if str(n).strip()]
+    if not names:
+        return jsonify({"ok": False,
+                        "error": "names must be a list of 1..100 keys"}), 400
+    try:
+        client = make_client(server)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 502
+
+    def one(name):
+        try:
+            res = client.client_ips(name)
+            return name, (res["count"] if res else None)
+        except Exception:  # noqa: BLE001
+            return name, None
+
+    counts = {}
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        for name, count in pool.map(one, names):
+            counts[name] = count
+    return jsonify({"ok": True, "supported": True, "counts": counts})
+
+
+@app.route("/api/server/<int:server_id>/export")
+@login_required
+def api_export_server(server_id):
+    """v6.1.3: download ALL keys on one server as CSV (backup).
+    Columns: name, link, expiry, gb_limit, used_gb, status. UTF-8
+    with BOM so Excel opens it correctly. Ownership is enforced by
+    _owned_server (admin: any server; reseller: own servers only).
+    A row whose link cannot be built (no password on record) is
+    still listed, with an empty link."""
+    server, err = _owned_server(server_id)
+    if err:
+        return err
+    try:
+        client = make_client(server)
+        clients = server_all_clients(server)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)[:300]}), 502
+    rows = []
+    for c in clients:
+        try:
+            if c.get("protocol") == "vless":
+                links = client.build_vless_links(c)
+                link = links.get("primary") or links.get("ws") or ""
+            else:
+                link = client.build_link(c)
+        except Exception:  # noqa: BLE001
+            link = ""
+        exp = c.get("expiry") or 0
+        rows.append([
+            c.get("name", ""),
+            link,
+            (datetime.fromtimestamp(exp, MM).strftime("%Y-%m-%d")
+             if exp else "never"),
+            str(int((c.get("limit") or 0) // 1073741824)),
+            "%.2f" % ((c.get("used") or 0) / 1073741824),
+            c.get("status") or "",
+        ])
+    buf = io.StringIO()
+    buf.write("\ufeff")  # BOM — Excel needs it to read UTF-8
+    w = csv.writer(buf)
+    w.writerow(["name", "link", "expiry", "gb_limit", "used_gb", "status"])
+    w.writerows(rows)
+    safe = "".join(ch for ch in server["name"]
+                   if ch.isalnum() or ch in "_-") or "server"
+    resp = Response(buf.getvalue(), mimetype="text/csv; charset=utf-8")
+    resp.headers["Content-Disposition"] = (
+        'attachment; filename="%s-keys.csv"' % safe)
+    return resp
 
 
 @app.route("/api/server/<int:server_id>/delete-vless-key", methods=["POST"])
