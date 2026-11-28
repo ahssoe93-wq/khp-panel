@@ -176,7 +176,12 @@ input:focus, select:focus { outline: none; border-color: var(--emerald); }
 input[type="date"] { color-scheme: dark; }
 label { display: block; color: var(--muted); font-size: 14px; margin: 12px 0 5px; }
 .searchbox { margin-bottom: 16px; }
-.seg { display: flex; gap: 8px; }
+.seg { display: flex; gap: 8px; flex-wrap: wrap; }
+.seg button { min-width: 0; }
+/* v6.1.6: Settings preset editor rows (months / GB / price). */
+.preset-row { display: flex; gap: 6px; align-items: center; margin: 6px 0; }
+.preset-row input { width: 84px; flex: none; }
+.preset-row .btn { flex: none; }
 .seg button {
   flex: 1; padding: 12px 0; border-radius: 12px;
   background: var(--surface2); color: var(--muted);
