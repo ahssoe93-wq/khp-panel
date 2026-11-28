@@ -939,7 +939,6 @@ async function checkSharedServerPage(btn) {
       const shared = items.filter(it =>
         (SHARED_MAP[sharedKey(SERVER_ID, it.protocol, it.name)] || 0) >= 3).length;
       renderClients();
-      renderVlessClients();
       toast('Checked ' + items.length + ' keys • ' + shared + ' shared (3+ IPs)');
     }
   } catch (e) { toast('Sharing check failed: ' + e.message); }
@@ -961,7 +960,7 @@ function renderSearchResults() {
       return '<div class="card client" data-server="' + c.server_id + '" data-name="' + esc(c.name) +
       '" onclick="location.href=\'/server/' + c.server_id + '\'">' +
       '<div class="row"><div class="grow"><div class="name">' + esc(c.name) +
-      (proto === 'vless' ? '<span class="badge-vless">VLESS</span>' : '') +
+      (proto === 'vless' || proto === 'both' ? '<span class="badge-vless">VLESS</span>' : '') +
       sharedBadgeHtml(c.server_id, proto, c.name) + '</div>' +
       '<div class="muted small">' + esc(c.server_name) + ' • ' + esc(c.used_h) + ' / ' + esc(c.limit_h) +
       ' • exp ' + esc(c.expiry_h) + '</div></div>' +
@@ -1051,14 +1050,8 @@ async function silentReloadServer(serverId) {
       ALL_CLIENTS = j.clients;
       document.getElementById('count-all').textContent = ALL_CLIENTS.length;
       renderClients();
-      // v6: quietly re-sync the VLESS list too, when the server has one.
-      if (HAS_VLESS) {
-        try {
-          const vj = await api('/api/server/' + serverId + '/vless-clients');
-          ALL_VLESS = vj.clients;
-          renderVlessClients();
-        } catch (e) { /* ignore — local rows already show the result */ }
-      }
+      // v6.1.5: the list is MERGED, so one re-fetch covers both
+      // protocols — no separate VLESS sync any more.
     } else if (document.getElementById('server-list')) {
       refreshDashboardQuiet();
     }
@@ -1091,25 +1084,8 @@ function applyKeyPatch(serverId, oldName, patch, skipRender) {
     }
     renderClients();
   }
-  // v6: the same patch can target a VLESS row — apply it there too.
-  if (typeof ALL_VLESS !== 'undefined' && document.getElementById('vless-list')) {
-    if (patch.remove) {
-      ALL_VLESS = ALL_VLESS.filter(c => c.name !== oldName);
-    } else {
-      const c = ALL_VLESS.find(x => x.name === oldName) ||
-        (patch.name ? ALL_VLESS.find(x => x.name === patch.name) : undefined);
-      if (c) {
-        if (patch.name) c.name = patch.name;
-        if (patch.expiry != null) { c.expiry = patch.expiry; c.expiry_h = patch.expiry_h || c.expiry_h; }
-        if (patch.limit != null) { c.limit = patch.limit; c.limit_h = fmtGB(patch.limit); c.pct = c.limit ? Math.min(100, Math.round(c.used * 100 / c.limit)) : 0; }
-        if (patch.used != null) { c.used = patch.used; c.used_h = fmtGB(patch.used); c.pct = c.limit ? Math.min(100, Math.round(c.used * 100 / c.limit)) : 0; }
-        if (patch.enable != null) c.enable = patch.enable;
-        if (patch.status) c.status = patch.status;
-        if (patch.created_at != null) c.created_at = patch.created_at;
-      }
-    }
-    renderVlessClients();
-  }
+  // v6.1.5: the patch applies to the MERGED row in ALL_CLIENTS
+  // above — there is no separate VLESS list any more.
   // dashboard key-overview rows use the same actions: keep them in sync.
   // A patch can move a key OUT of a list (renewed / edited / swapped),
   // never into one — the quiet overview re-fetch corrects any drift.
@@ -1191,16 +1167,8 @@ async function loadServerPage() {
       HAS_VLESS = true;
       const pw = document.getElementById('add-proto-wrap');
       if (pw) pw.style.display = '';
-      const vs = document.getElementById('vless-section');
-      if (vs) vs.style.display = '';
-      try {
-        const vj = await api('/api/server/' + SERVER_ID + '/vless-clients');
-        ALL_VLESS = vj.clients;
-        renderVlessClients();
-      } catch (e) {
-        document.getElementById('vless-list').innerHTML =
-          '<div class="error">Could not load VLESS keys: ' + esc(e.message) + '</div>';
-      }
+      // v6.1.5: the key list itself is MERGED (one row per customer),
+      // so there is no separate VLESS fetch or section any more.
     }
   } catch (e) {
     document.getElementById('client-list').innerHTML =
@@ -1208,69 +1176,8 @@ async function loadServerPage() {
   }
   await healthP;
 }
-/* v6: the VLESS list mirrors the Outline list — same filter text,
-   same sort chips, same NEW / expiring-today marks. Rows carry two
-   copy buttons (WS + XHTTP) instead of one. */
-function filteredVless() {
-  const raw = document.getElementById('client-filter').value || '';
-  const pasted = nameFromPastedKey(raw);
-  const f = (pasted !== null ? pasted : raw).toLowerCase();
-  const now = Date.now() / 1000;
-  let list = ALL_VLESS.filter(c => c.name.toLowerCase().includes(f));
-  if (FILTER_BY === 'expiring')
-    list = list.filter(c => c.expiry && c.expiry - now <= 3 * 86400);
-  if (FILTER_BY === 'high')
-    list = list.filter(c => c.pct >= 70);
-  if (SORT_BY === 'newest') {
-    list.sort((a, b) => {
-      const ca = a.created_at || 0, cb = b.created_at || 0;
-      if ((ca > 0) !== (cb > 0)) return cb - ca;
-      if (ca && cb) return cb - ca;
-      return (a.expiry || 1e15) - (b.expiry || 1e15);
-    });
-  } else if (SORT_BY === 'expiry')
-    list.sort((a, b) => (a.expiry || 1e15) - (b.expiry || 1e15));
-  else if (SORT_BY === 'usage')
-    list.sort((a, b) => (b.used || 0) - (a.used || 0));
-  else
-    list.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
-  return list;
-}
-function renderVlessClients() {
-  const el = document.getElementById('vless-list');
-  if (!el) return;
-  const list = filteredVless();
-  if (!list.length) { el.innerHTML = '<div class="empty">No VLESS keys found.</div>'; }
-  else {
-    el.innerHTML = list.map(c => {
-      const n = esc(c.name).replace(/'/g, "\\'");
-      const toggleLabel = c.enable ? 'Disable' : 'Enable';
-      const isNew = isNewKey(c);
-      const checked = SEL.has('vless:' + c.name) ? ' checked' : '';
-      return '<div class="card client' + (isExpiringToday(c) ? ' expiring-today' : '') + (isNew ? ' is-new' : '') + '">' +
-      '<div class="row"><input type="checkbox" class="key-check" data-proto="vless" data-name="' + esc(c.name) + '"' + checked + ' onchange="toggleSelect(this)">' +
-      '<div class="grow"><div class="name">' + esc(c.name) +
-      '<span class="badge-vless">VLESS</span>' + (isNew ? '<span class="badge-new">NEW</span>' : '') +
-      sharedBadgeHtml(c.server_id, 'vless', c.name) + '</div></div>' +
-      '<div class="badges"><span class="status ' + c.status + '">' + c.status + '</span>' +
-      onlinePillHtml(c) + '</div></div>' +
-      '<div class="muted small" style="margin-top:4px">' + esc(c.used_h) + ' / ' + esc(c.limit_h) + ' • exp ' + esc(c.expiry_h) + '</div>' +
-      '<div class="bar"><i style="width:' + c.pct + '%"></i></div>' +
-      '<div class="actions">' +
-      '<button class="btn ghost sm" onclick="copyVlessLink(' + c.server_id + ', \'' + n + '\', \'ws\', this)">Copy WS link</button>' +
-      '<button class="btn ghost sm" onclick="copyVlessLink(' + c.server_id + ', \'' + n + '\', \'xhttp\', this)">Copy XHTTP link</button>' +
-      '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + n + '\', \'vless\')">Renew</button>' +
-      '<button class="btn ghost sm" onclick="swapKey(' + c.server_id + ', \'' + n + '\', this, \'vless\')">Swap</button>' +
-      '<button class="btn ghost sm" onclick="toggleKey(' + c.server_id + ', \'' + n + '\', ' + (!c.enable) + ', this, \'vless\')">' + toggleLabel + '</button>' +
-      '<button class="btn ghost sm" onclick="openEditModal(' + c.server_id + ', \'' + n + '\', null, \'\', \'vless\')">Edit</button>' +
-      '<button class="btn ghost sm red" onclick="deleteKey(' + c.server_id + ', \'' + n + '\', this, \'vless\')">Delete</button>' +
-      '</div></div>';
-    }).join('');
-  }
-  document.getElementById('vless-info').textContent =
-    list.length + ' VLESS key' + (list.length === 1 ? '' : 's');
-  updateSelBar();
-}
+/* v6.1.5: the VLESS list is gone — the key list is MERGED
+   (one row per customer); see renderClients(). */
 /* v6.1: Online / Offline pill. "online" is present only when the panel
    actually supplied it — absent means unknown, and no pill is shown
    (never "everyone Offline" on a failed read). Online is NOT the same
@@ -1291,9 +1198,7 @@ function selFiltered() {
   // every currently-filtered key on this server page, both protocols
   const out = [];
   if (typeof ALL_CLIENTS !== 'undefined')
-    filteredClients().forEach(c => out.push({name: c.name, protocol: 'outline'}));
-  if (HAS_VLESS && typeof ALL_VLESS !== 'undefined')
-    filteredVless().forEach(c => out.push({name: c.name, protocol: 'vless'}));
+    filteredClients().forEach(c => out.push({name: c.name, protocol: c.protocol || 'outline'}));
   return out;
 }
 function toggleSelectAll(checked) {
@@ -1301,7 +1206,6 @@ function toggleSelectAll(checked) {
   if (checked) items.forEach(it => SEL.add(it.protocol + ':' + it.name));
   else items.forEach(it => SEL.delete(it.protocol + ':' + it.name));
   renderClients();
-  renderVlessClients();
   updateSelBar();
 }
 function updateSelBar() {
@@ -1408,15 +1312,13 @@ async function submitBulkCreate() {
         used: 0, used_h: '0 GB', limit: j.limit, limit_h: fmtGB(j.limit),
         expiry: 0, expiry_h: j.expiry_h, pct: 0, created_at: now,
         protocol: k.protocol};
-      if (k.protocol === 'vless' && typeof ALL_VLESS !== 'undefined') ALL_VLESS.unshift(c);
-      else if (typeof ALL_CLIENTS !== 'undefined') ALL_CLIENTS.unshift(c);
+      if (typeof ALL_CLIENTS !== 'undefined') ALL_CLIENTS.unshift(c);
     });
     if (typeof ALL_CLIENTS !== 'undefined') {
       document.getElementById('count-all').textContent = ALL_CLIENTS.length;
       SHOWN = PAGE_SIZE;
       renderClients();
     }
-    if (HAS_VLESS) renderVlessClients();
     scheduleQuietSync(SERVER_ID);
   } catch (e) { toast('Bulk create failed: ' + e.message); }
   btn.disabled = false; btn.textContent = 'Create keys';
@@ -1487,25 +1389,40 @@ function renderClients() {
       const n = esc(c.name).replace(/'/g, "\\'");
       const toggleLabel = c.enable ? 'Disable' : 'Enable';
       const isNew = isNewKey(c);
-      const checked = SEL.has('outline:' + c.name) ? ' checked' : '';
+      // v6.1.5: one row per customer — the row's protocol is
+      // 'both' (Outline + VLESS), 'outline' or 'vless'; the checkbox
+      // and every action carry it, so bulk delete/renew and the
+      // sharing badge all key off the same value.
+      const proto = c.protocol || 'outline';
+      const checked = SEL.has(proto + ':' + c.name) ? ' checked' : '';
       // v4 cleaner card: name (+ NEW badge) and status on one row,
       // usage line below, slim full-width bar, then the buttons.
+      // v6.1.5: copy buttons per side — Outline link and/or WS +
+      // XHTTP links; actions run on BOTH sides of a dual customer.
+      const copyBtns =
+        (proto !== 'vless'
+          ? '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + n + '\', this)">Copy link</button>'
+          : '') +
+        (proto !== 'outline'
+          ? '<button class="btn ghost sm" onclick="copyVlessLink(' + c.server_id + ', \'' + n + '\', \'ws\', this)">Copy WS link</button>' +
+            '<button class="btn ghost sm" onclick="copyVlessLink(' + c.server_id + ', \'' + n + '\', \'xhttp\', this)">Copy XHTTP link</button>'
+          : '');
       return '<div class="card client' + (isExpiringToday(c) ? ' expiring-today' : '') + (isNew ? ' is-new' : '') + '">' +
-      '<div class="row"><input type="checkbox" class="key-check" data-proto="outline" data-name="' + esc(c.name) + '"' + checked + ' onchange="toggleSelect(this)">' +
+      '<div class="row"><input type="checkbox" class="key-check" data-proto="' + proto + '" data-name="' + esc(c.name) + '"' + checked + ' onchange="toggleSelect(this)">' +
       '<div class="grow"><div class="name">' + esc(c.name) +
+      (proto !== 'outline' ? '<span class="badge-vless">VLESS</span>' : '') +
       (isNew ? '<span class="badge-new">NEW</span>' : '') +
-      sharedBadgeHtml(c.server_id, 'outline', c.name) + '</div></div>' +
+      sharedBadgeHtml(c.server_id, proto, c.name) + '</div></div>' +
       '<div class="badges"><span class="status ' + c.status + '">' + c.status + '</span>' +
       onlinePillHtml(c) + '</div></div>' +
       '<div class="muted small" style="margin-top:4px">' + esc(c.used_h) + ' / ' + esc(c.limit_h) + ' • exp ' + esc(c.expiry_h) + '</div>' +
       '<div class="bar"><i style="width:' + c.pct + '%"></i></div>' +
-      '<div class="actions">' +
-      '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + n + '\', this)">Copy link</button>' +
-      '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + n + '\')">Renew</button>' +
-      '<button class="btn ghost sm" onclick="swapKey(' + c.server_id + ', \'' + n + '\', this)">Swap</button>' +
-      '<button class="btn ghost sm" onclick="toggleKey(' + c.server_id + ', \'' + n + '\', ' + (!c.enable) + ', this)">' + toggleLabel + '</button>' +
-      '<button class="btn ghost sm" onclick="openEditModal(' + c.server_id + ', \'' + n + '\')">Edit</button>' +
-      '<button class="btn ghost sm red" onclick="deleteKey(' + c.server_id + ', \'' + n + '\', this)">Delete</button>' +
+      '<div class="actions">' + copyBtns +
+      '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + n + '\', \'' + proto + '\')">Renew</button>' +
+      '<button class="btn ghost sm" onclick="swapKey(' + c.server_id + ', \'' + n + '\', this, \'' + proto + '\')">Swap</button>' +
+      '<button class="btn ghost sm" onclick="toggleKey(' + c.server_id + ', \'' + n + '\', ' + (!c.enable) + ', this, \'' + proto + '\')">' + toggleLabel + '</button>' +
+      '<button class="btn ghost sm" onclick="openEditModal(' + c.server_id + ', \'' + n + '\', null, \'\', \'' + proto + '\')">Edit</button>' +
+      '<button class="btn ghost sm red" onclick="deleteKey(' + c.server_id + ', \'' + n + '\', this, \'' + proto + '\')">Delete</button>' +
       '</div></div>';
     }).join('');
   }
@@ -1588,7 +1505,12 @@ async function swapKey(serverId, name, btn, proto) {
         showActionResult(j.name, j.links.ws || j.link,
           'Swapped — new UUID, same name / expiry / GB', j.links.xhttp);
       } else {
-        showActionResult(j.name, j.link, 'Swapped — new password, same name / expiry / GB');
+        // v6.1.5: a dual customer also swapped its VLESS side (new
+        // UUID) — show its XHTTP link as the second link.
+        showActionResult(j.name, j.link,
+          j.links ? 'Swapped — new password + new UUID, same name / expiry / GB'
+                  : 'Swapped — new password, same name / expiry / GB',
+          j.links ? j.links.xhttp : undefined);
       }
       toast('Swapped ' + name);
       // fresh password/UUID => used traffic resets to 0; it is a new key now
@@ -1674,8 +1596,11 @@ async function submitRenew(serverId, name, months, btn, proto) {
       showActionResult(j.name, j.links.ws || j.link,
         'renewed +' + months + ' mo • ' + j.gb + ' GB • exp ' + j.expiry_h, j.links.xhttp);
     } else {
+      // v6.1.5: a dual customer also renewed its VLESS side — show
+      // its XHTTP link as the second link.
       showActionResult(j.name, j.link,
-        'renewed +' + months + ' mo • ' + j.gb + ' GB • exp ' + j.expiry_h);
+        'renewed +' + months + ' mo • ' + j.gb + ' GB • exp ' + j.expiry_h,
+        j.links ? j.links.xhttp : undefined);
     }
     toast('Renewed → ' + j.name);
     applyKeyPatch(serverId, name, {name: j.name, expiry: j.expiry,
@@ -1694,8 +1619,9 @@ function nameDateISO(name) {
 function openEditModal(serverId, name, gbPrefill, datePrefill, proto) {
   let gbVal = gbPrefill, dateVal = datePrefill;
   if (gbVal == null || !dateVal) {
-    const list = (proto === 'vless' && typeof ALL_VLESS !== 'undefined')
-      ? ALL_VLESS : (typeof ALL_CLIENTS !== 'undefined' ? ALL_CLIENTS : []);
+    // v6.1.5: one merged list — the key is looked up there whatever
+    // its protocol is.
+    const list = (typeof ALL_CLIENTS !== 'undefined' ? ALL_CLIENTS : []);
     const c = list.find(x => x.name === name);
     if (c) {
       if (gbVal == null) gbVal = Math.round((c.limit || 0) / 1073741824) || 400;
@@ -1741,7 +1667,9 @@ async function submitEdit(serverId, name, btn, proto) {
         showActionResult(j.name, j.links.ws || j.link,
           'edited • ' + j.gb + ' GB • exp ' + j.expiry_h, j.links.xhttp);
       } else {
-        showActionResult(j.name, j.link, 'edited • ' + j.gb + ' GB • exp ' + j.expiry_h);
+        // v6.1.5: a dual customer also edited its VLESS side.
+        showActionResult(j.name, j.link, 'edited • ' + j.gb + ' GB • exp ' + j.expiry_h,
+          j.links ? j.links.xhttp : undefined);
       }
     } else {
       toast('Updated • ' + j.gb + ' GB • exp ' + j.expiry_h);
@@ -1813,24 +1741,14 @@ async function submitAddKey() {
     document.getElementById('add-result').style.display = '';
     // v4: the new key appears at the top AT ONCE (Newest sort + NEW badge)
     // — no waiting for a full list re-fetch.
-    if (proto === 'vless') {
-      if (typeof ALL_VLESS !== 'undefined') {
-        ALL_VLESS.unshift({
-          name: j.name, server_id: SERVER_ID, status: 'active', enable: true,
-          used: 0, used_h: '0 GB', limit: j.limit, limit_h: fmtGB(j.limit),
-          expiry: j.expiry_ts, expiry_h: j.expiry_h, pct: 0,
-          created_at: j.created_at || Math.floor(Date.now() / 1000),
-          protocol: 'vless',
-        });
-        SHOWN = PAGE_SIZE;
-        renderVlessClients();
-      }
-    } else if (typeof ALL_CLIENTS !== 'undefined') {
+    // v6.1.5: new keys (either protocol) join the MERGED list.
+    if (typeof ALL_CLIENTS !== 'undefined') {
       ALL_CLIENTS.unshift({
         name: j.name, server_id: SERVER_ID, status: 'active', enable: true,
         used: 0, used_h: '0 GB', limit: j.limit, limit_h: fmtGB(j.limit),
         expiry: j.expiry_ts, expiry_h: j.expiry_h, pct: 0,
         created_at: j.created_at || Math.floor(Date.now() / 1000),
+        protocol: proto,
       });
       document.getElementById('count-all').textContent = ALL_CLIENTS.length;
       SHOWN = PAGE_SIZE;
