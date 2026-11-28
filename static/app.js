@@ -338,17 +338,33 @@ function serverRowHtml(s) {
     '<span class="chev chev-l3">›</span>' + bar + '</div>';
 }
 /* Right side of a group header: server count + total keys + whether the
-   whole group is online, with a green dot. */
-function groupMetaHtml(items) {
+   whole group is online, with a green dot.
+   v6.1.11: line=true renders ONE line — "6 servers • 444 keys • all
+   online" — for country-group headers (and reseller channel headers):
+   the two-line version wrapped word-by-word into a vertical stack
+   ("6 / servers / 444 keys / • all / online") on a 360px phone once
+   the name + flag + dot + "+" + chevron squeezed the meta narrow.
+   The one-line version lives on its own dedicated line (see
+   style.css v6.1.11) and can never stack. line=false keeps the old
+   two-line meta for the owner headers (MY SERVERS / OTHER), whose
+   short fixed names leave the meta room. */
+function groupMetaHtml(items, line) {
   const hasHealth = items.some(s => HEALTH[s.id]);
   const allOnline = hasHealth && items.every(s => HEALTH[s.id] && HEALTH[s.id].online);
   const keysTotal = items.reduce((a, s) =>
     a + ((HEALTH[s.id] && HEALTH[s.id].online) ? (HEALTH[s.id].clients || 0) : 0), 0);
+  const sText = hasHealth ? keysTotal.toLocaleString('en-US') + ' keys • ' +
+    (allOnline ? 'all online' : 'some down') : 'checking…';
+  if (line) {
+    return (allOnline ? '<span class="dot"></span>' : '') +
+      '<div class="meta meta-line"><span class="n">' + items.length + ' server' +
+      (items.length === 1 ? '' : 's') + '</span> • <span class="s">' +
+      sText + '</span></div>';
+  }
   return (allOnline ? '<span class="dot"></span>' : '') +
     '<div class="meta"><div class="n">' + items.length + ' server' +
     (items.length === 1 ? '' : 's') + '</div>' +
-    '<div class="s">' + (hasHealth ? keysTotal.toLocaleString('en-US') + ' keys • ' +
-      (allOnline ? 'all online' : 'some down') : 'checking…') + '</div></div>';
+    '<div class="s">' + sText + '</div></div>';
 }
 function renderServers() {
   const el = document.getElementById('server-list');
@@ -384,7 +400,7 @@ function renderServers() {
     let html = '<div class="group-h country" data-group="' + esc(g) + '" onclick="toggleGroup(\'' + esc(g) + '\')">' +
       '<span class="gflag">' + flagFor(g === 'Other' ? '' : g) + '</span>' +
       '<b>' + esc(countryName(g)) + '</b>' +
-      groupMetaHtml(items) +
+      groupMetaHtml(items, true) +
       '<span class="chev chev-l2">' + chev + '</span></div>';
     if (collapsed) return html;
     html += items.map(serverRowHtml).join('');
@@ -446,7 +462,7 @@ function countryGroupsHtml(servers, f, keyPrefix) {
     let html = '<div class="group-h country" data-group="' + esc(key) + '" onclick="toggleGroup(\'' + esc(key) + '\')">' +
       '<span class="gflag">' + flagFor(g === 'Other' ? '' : g) + '</span>' +
       '<b>' + esc(countryName(g)) + '</b>' +
-      groupMetaHtml(items) +
+      groupMetaHtml(items, true) +
       // v6.1.10: "+" on every country-group header (admin only) —
       // opens the add-server form with that country pre-filled.
       // The raw country value (e.g. 'SG') is passed so the new
@@ -472,7 +488,7 @@ function ownerGroupHtml(key, title, servers, f, persons) {
       const pchev = pCollapsed ? '▼' : '▲';
       let ph = '<div class="person-h" data-group="' + esc(pkey) + '" onclick="toggleGroup(\'' + esc(pkey) + '\')">' +
         '<b>' + esc(p.servers[0].owner_display || p.owner) + '</b>' +
-        groupMetaHtml(p.servers) +
+        groupMetaHtml(p.servers, true) +
         '<span class="chev chev-l2">' + pchev + '</span></div>';
       if (pCollapsed) return ph;
       return ph + '<div class="person-body">' +
@@ -2395,4 +2411,15 @@ async function importServers() {
   } catch (e) {
     out.innerHTML = '<div class="error">Import failed: ' + esc(e.message) + '</div>';
   }
+}
+
+/* v6.1.11: PWA — register the service worker (static assets only;
+/api/ is network-only, see sw.js). No custom install banner: the
+browser shows its natural install prompt. A failed registration
+(offline, first-run setup, old browser) is silent — the panel
+works exactly as before without it. */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
 }
