@@ -29,14 +29,17 @@
 <main id="page">
   {% block content %}{% endblock %}
 </main>
-{% if session.get('logged_in') %}
+{# v6.1.2: the bottom nav is Super Admin only — resellers get NO nav
+   at all (no Servers / Search pills; they already had no Settings).
+   The nav is fixed-position, so rendering an empty <nav> for them
+   would leave a dead bar at the bottom; it is omitted entirely.
+   Resellers still reach everything they need from the dashboard
+   itself (their servers + the Find a key box). #}
+{% if session.get('logged_in') and session.get('role') == 'admin' %}
 <nav class="bottom">
   <a href="{{ url_for('dashboard') }}" data-tab="servers" onclick="return navTab(this, event)" class="nav-servers {{ 'on' if nav=='servers' else '' }}">Servers</a>
   <a href="{{ url_for('dashboard') }}#search" data-tab="search" onclick="return navTab(this, event)" class="nav-search {{ 'on' if nav=='search' else '' }}">Search</a>
-  {# v6: Settings (servers + users + import) is Super Admin only — resellers get a 403 there, so the tab is hidden for them. #}
-  {% if session.get('role') == 'admin' %}
   <a href="{{ url_for('settings') }}" data-tab="settings" onclick="return navTab(this, event)" class="nav-settings {{ 'on' if nav=='settings' else '' }}">Settings</a>
-  {% endif %}
 </nav>
 {% endif %}
 <div id="toast"></div>
