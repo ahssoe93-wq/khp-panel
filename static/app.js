@@ -50,6 +50,11 @@ let IS_ADMIN = BODY_ROLE === 'admin';
 // are the TRUE counts. EXP_COUNTS feeds the "N expiring" note on
 // server cards (expiring within 3 days now, not 7).
 let OV_BY_OWNER = {};
+// v6.1.2: the "total" aggregate from /api/key-overview — the same
+// three lists merged across ALL visible servers (admin: 54; reseller:
+// own servers only). Renders as the TOTAL sections below MY SERVERS /
+// OTHER on the admin dashboard.
+let OV_TOTAL = null;
 let OV_STATS = null, OVERVIEW_LOADED = false;
 let EXP_COUNTS = {};
 // v6.1.1: the three key sections are per-owner now (MY SERVERS / one
@@ -75,6 +80,7 @@ try {
     HEALTH = _s.health || {};
     CHECKED_AT = _s.checkedAt || 0;
     OV_BY_OWNER = _s.byOwner || {};
+    OV_TOTAL = _s.ovTotal || null;
     OV_STATS = _s.ovStats || null;
     OVERVIEW_LOADED = !!_s.ovLoaded;
     EXPANDED = new Set(_s.expanded || []);
@@ -89,7 +95,7 @@ function persistTabCache() {
     sessionStorage.setItem('khp_nav_cache_v3', JSON.stringify({
       user: BODY_USER,
       nav: NAV_CACHE, servers: SERVERS, health: HEALTH,
-      checkedAt: CHECKED_AT, byOwner: OV_BY_OWNER,
+      checkedAt: CHECKED_AT, byOwner: OV_BY_OWNER, ovTotal: OV_TOTAL,
       ovStats: OV_STATS, ovLoaded: OVERVIEW_LOADED,
       expanded: [...EXPANDED]}));
   } catch (e) { /* ignore */ }
@@ -220,6 +226,7 @@ function applyOverview(j) {
   OVERVIEW_LOADED = true;
   OV_STATS = j.stats || null;
   OV_BY_OWNER = j.by_owner || {};
+  OV_TOTAL = j.total || null;
   EXP_COUNTS = {};
   Object.values(OV_BY_OWNER).forEach(o => {
     (o.expiring || []).forEach(c => { EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1; });
@@ -384,6 +391,9 @@ function renderServersByOwner(el, list, f) {
   if (mine.length || !f) html += ownerGroupHtml('owner:admin', 'MY SERVERS', mine, f, null);
   if (others.length || !f) html += ownerGroupHtml('group:other', 'OTHER', others, f,
     personOrder.map(o => ({owner: o, servers: persons[o]})));
+  // v6.1.2: TOTAL sections below the owner groups (admin only) — the
+  // same three lists aggregated across ALL visible servers.
+  html += totalSectionsHtml();
   if (lastServersHtml !== html) { el.innerHTML = html; lastServersHtml = html; }
 }
 /* Country groups inside one owner/channel: SG / JP / TH first, then
@@ -494,6 +504,40 @@ function toggleOwnerSectionAll(owner, which, showAll) {
   if (showAll) SEC_ALL.add(k); else SEC_ALL.delete(k);
   renderServers();
 }
+function secHeaderHtml(owner, which, title, total) {
+  const m = SEC_META[which];
+  const collapsed = secCollapsed(owner, which);
+  const badge = (OVERVIEW_LOADED && total)
+    ? '<span class="' + m.badge + '">' + total + '</span>' : '';
+  return '<div class="sec-head owner-sec" data-owner="' + esc(owner) + '" data-which="' + which +
+    '" onclick="toggleOwnerSection(\'' + esc(owner) + '\', \'' + which + '\')">' +
+    '<h2 class="sec ' + m.cls + '">' + title + '</h2>' +
+    '<span class="muted small">' + (collapsed ? 'tap to show' : 'tap to hide') + '</span>' +
+    badge +
+    '<span class="chev">' + (collapsed ? '▼' : '▲') + '</span></div>';
+}
+function secBodyHtml(owner, which, list, total) {
+  const m = SEC_META[which];
+  if (!OVERVIEW_LOADED) return '<div class="spin">Loading…</div>';
+  if (!list.length) return '<div class="empty">' + m.empty + '</div>';
+  const all = SEC_ALL.has(secKey(owner, which));
+  const shown = all ? list : list.slice(0, 5);
+  let body = '';
+  // v6.1.2: bulk delete on EXPIRED sections only — Select all +
+  // Delete selected above the rows, checkboxes on the rows. Expiring
+  // / Low keys are still active, so they never get a delete bar.
+  if (which === 'expired') body += expSelBarHtml(owner, list);
+  body += shown.map(m.row).join('');
+  if (!all && list.length > 5) {
+    body += '<button class="see-all" onclick="toggleOwnerSectionAll(\'' + esc(owner) + '\', \'' + which + '\', true)">See all ' + total + ' →</button>';
+  } else if (all && list.length > 5) {
+    body += '<button class="see-all" onclick="toggleOwnerSectionAll(\'' + esc(owner) + '\', \'' + which + '\', false)">Show less ↑</button>';
+  }
+  if (all && list.length < total) {
+    body += '<div class="muted small" style="text-align:center;padding:6px 0">Showing ' + list.length + ' of ' + total + '</div>';
+  }
+  return body;
+}
 function ownerSectionsHtml(owner) {
   if (!owner) return '';
   const o = OV_BY_OWNER[owner];
@@ -505,34 +549,29 @@ function ownerSectionsHtml(owner) {
     // NOT by the section id ('exp3' / 'lowgb') — see SEC_META.listKey.
     const list = o ? (o[m.listKey] || []) : [];
     const collapsed = secCollapsed(owner, which);
-    const all = SEC_ALL.has(secKey(owner, which));
-    const badge = (OVERVIEW_LOADED && total)
-      ? '<span class="' + m.badge + '">' + total + '</span>' : '';
-    let h = '<div class="sec-head owner-sec" data-owner="' + esc(owner) + '" data-which="' + which +
-      '" onclick="toggleOwnerSection(\'' + esc(owner) + '\', \'' + which + '\')">' +
-      '<h2 class="sec ' + m.cls + '">' + m.title + '</h2>' +
-      '<span class="muted small">' + (collapsed ? 'tap to show' : 'tap to hide') + '</span>' +
-      badge +
-      '<span class="chev">' + (collapsed ? '▼' : '▲') + '</span></div>';
+    const h = secHeaderHtml(owner, which, m.title, total);
     if (collapsed) return h;
-    let body;
-    if (!OVERVIEW_LOADED) {
-      body = '<div class="spin">Loading…</div>';
-    } else if (!list.length) {
-      body = '<div class="empty">' + m.empty + '</div>';
-    } else {
-      const shown = all ? list : list.slice(0, 5);
-      body = shown.map(m.row).join('');
-      if (!all && list.length > 5) {
-        body += '<button class="see-all" onclick="toggleOwnerSectionAll(\'' + esc(owner) + '\', \'' + which + '\', true)">See all ' + total + ' →</button>';
-      } else if (all && list.length > 5) {
-        body += '<button class="see-all" onclick="toggleOwnerSectionAll(\'' + esc(owner) + '\', \'' + which + '\', false)">Show less ↑</button>';
-      }
-      if (all && list.length < total) {
-        body += '<div class="muted small" style="text-align:center;padding:6px 0">Showing ' + list.length + ' of ' + total + '</div>';
-      }
-    }
-    return h + '<div class="owner-sec-list" data-owner="' + esc(owner) + '" data-which="' + which + '">' + body + '</div>';
+    return h + '<div class="owner-sec-list" data-owner="' + esc(owner) + '" data-which="' + which + '">' +
+      secBodyHtml(owner, which, list, total) + '</div>';
+  }).join('');
+}
+/* v6.1.2: the TOTAL sections — same three lists aggregated across ALL
+   visible servers (the admin's 54), rendered below MY SERVERS / OTHER.
+   Titles are the per-owner titles with "Total " in front (the h2.sec
+   CSS uppercases them). Reseller dashboards never render these: their
+   own three sections already ARE their totals. Collapse state reuses
+   secCollapsed with the pseudo-owner 'total' (per-user keys, as usual). */
+function totalSectionsHtml() {
+  const totals = OV_TOTAL ? OV_TOTAL.totals : {expiring_3d: 0, low_gb: 0, expired: 0};
+  return SEC_WHICH.map(which => {
+    const m = SEC_META[which];
+    const total = totals[which === 'exp3' ? 'expiring_3d' : which === 'lowgb' ? 'low_gb' : 'expired'];
+    const list = OV_TOTAL ? (OV_TOTAL[m.listKey] || []) : [];
+    const collapsed = secCollapsed('total', which);
+    const h = secHeaderHtml('total', which, 'Total ' + m.title, total);
+    if (collapsed) return h;
+    return h + '<div class="owner-sec-list" data-owner="total" data-which="' + which + '">' +
+      secBodyHtml('total', which, list, total) + '</div>';
   }).join('');
 }
 /* Shared action buttons for a key row on the dashboard (Renew / Swap /
@@ -566,16 +605,122 @@ function expiredRowHtml(c) {
   const reason = c.expired_reason === 'gb'
     ? 'GB used up (' + esc(c.used_h) + ' / ' + esc(c.limit_h) + ')'
     : 'expired ' + esc(c.expiry_h);
-  return '<div class="card client"><div class="row"><div class="grow">' +
+  // v6.1.2: bulk-delete checkbox — same row, first child of .row.
+  // The selection lives in EXP_SEL (server|proto|name), so a key
+  // checked in its owner's section is checked in Total too.
+  const proto = c.protocol || 'outline';
+  const checked = EXP_SEL.has(expSelKey(c.server_id, proto, c.name)) ? ' checked' : '';
+  return '<div class="card client"><div class="row">' +
+    '<input type="checkbox" class="key-check exp-sel" data-server="' + c.server_id +
+    '" data-proto="' + proto + '" data-name="' + esc(c.name) + '"' + checked +
+    ' onchange="toggleExpSel(this)">' +
+    '<div class="grow">' +
     '<div class="name">' + esc(c.name) + '</div>' +
     '<div class="muted small">' + esc(c.server_name) + ' • ' + reason + '</div></div>' +
     '<span class="status expired">expired</span></div>' +
     '<div class="actions">' +
-    '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', \'' + (c.protocol || 'outline') + '\')">Renew</button>' +
-    '<button class="btn ghost sm" onclick="openEditModal(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', ' + Math.round((c.limit || 0) / 1073741824) + ', \'' + nameDateISO(c.name) + '\', \'' + (c.protocol || 'outline') + '\')">Edit</button>' +
-    '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this, \'' + (c.protocol || 'outline') + '\')">Copy link</button>' +
-    '<button class="btn ghost sm red" onclick="deleteKey(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this, \'' + (c.protocol || 'outline') + '\')">Delete</button>' +
+    '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', \'' + proto + '\')">Renew</button>' +
+    '<button class="btn ghost sm" onclick="openEditModal(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', ' + Math.round((c.limit || 0) / 1073741824) + ', \'' + nameDateISO(c.name) + '\', \'' + proto + '\')">Edit</button>' +
+    '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this, \'' + proto + '\')">Copy link</button>' +
+    '<button class="btn ghost sm red" onclick="deleteKey(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this, \'' + proto + '\')">Delete</button>' +
     '</div></div>';
+}
+/* v6.1.2: bulk delete in EXPIRED sections (Total Expired, MY
+   SERVERS' Expired, each channel's Expired, each reseller's own
+   Expired). Selection is "serverId|proto|name" — the same key checked
+   in two sections is ONE selection; deleting removes it from every
+   list at once (applyKeyPatch). Select all takes the section's whole
+   LISTED set (capped at 100 in the payload) and expands the section
+   so every selected row is visible. Deletion reuses the existing
+   per-server /bulk-delete-key endpoint, grouped by server. */
+let EXP_SEL = new Set();
+function expSelKey(serverId, proto, name) { return serverId + '|' + proto + '|' + name; }
+function expSectionList(owner) {
+  // the listed expired keys for one section ('total' or an owner)
+  if (owner === 'total') return OV_TOTAL ? (OV_TOTAL.expired || []) : [];
+  const o = OV_BY_OWNER[owner];
+  return o ? (o.expired || []) : [];
+}
+function expSelBarHtml(owner, list) {
+  const n = list.filter(c => EXP_SEL.has(expSelKey(c.server_id, c.protocol || 'outline', c.name))).length;
+  const allChecked = list.length > 0 && n === list.length;
+  return '<div class="sel-bar exp-sel-bar" data-owner="' + esc(owner) + '">' +
+    '<label class="sel-all"><input type="checkbox"' + (allChecked ? ' checked' : '') +
+    ' onchange="toggleExpSelAll(\'' + esc(owner) + '\', this.checked)"> <span>Select all (' + list.length + ')</span></label>' +
+    '<button class="btn danger sm" style="display:' + (n ? '' : 'none') + '" onclick="deleteExpiredSelected(\'' + esc(owner) + '\', this)">Delete selected (' + n + ')</button></div>';
+}
+function toggleExpSel(cb) {
+  const k = expSelKey(cb.dataset.server, cb.dataset.proto, cb.dataset.name);
+  if (cb.checked) EXP_SEL.add(k); else EXP_SEL.delete(k);
+  updateExpSelBars();
+}
+function toggleExpSelAll(owner, checked) {
+  const list = expSectionList(owner);
+  // selecting all also expands the section, so every selected row is
+  // visible (the preview shows only 5).
+  SEC_ALL.add(secKey(owner, 'expired'));
+  list.forEach(c => {
+    const k = expSelKey(c.server_id, c.protocol || 'outline', c.name);
+    if (checked) EXP_SEL.add(k); else EXP_SEL.delete(k);
+  });
+  renderServers();
+  updateExpSelBars();
+}
+function updateExpSelBars() {
+  // in-place refresh of every expired-section bar (no full re-render):
+  // Select-all checkbox state, Delete button visibility + count — and
+  // every expired-row checkbox, so a key checked in Total is checked
+  // in its owner's section too (same EXP_SEL entry).
+  document.querySelectorAll('.exp-sel').forEach(cb => {
+    cb.checked = EXP_SEL.has(expSelKey(cb.dataset.server, cb.dataset.proto, cb.dataset.name));
+  });
+  document.querySelectorAll('.owner-sec-list[data-which="expired"]').forEach(div => {
+    const owner = div.dataset.owner;
+    const list = expSectionList(owner);
+    const n = list.filter(c => EXP_SEL.has(expSelKey(c.server_id, c.protocol || 'outline', c.name))).length;
+    const bar = div.querySelector('.exp-sel-bar');
+    if (!bar) return;
+    const cb = bar.querySelector('input[type="checkbox"]');
+    if (cb) cb.checked = list.length > 0 && n === list.length;
+    const btn = bar.querySelector('button');
+    if (btn) {
+      btn.style.display = n ? '' : 'none';
+      btn.textContent = 'Delete selected (' + n + ')';
+    }
+  });
+}
+async function deleteExpiredSelected(owner, btn) {
+  const list = expSectionList(owner);
+  const items = list.filter(c => EXP_SEL.has(expSelKey(c.server_id, c.protocol || 'outline', c.name)));
+  if (!items.length) return;
+  const byServer = {};
+  items.forEach(c => {
+    (byServer[c.server_id] = byServer[c.server_id] || []).push(
+      {name: c.name, protocol: c.protocol || 'outline'});
+  });
+  // two-click confirm showing the count — never delete without it
+  // (same pattern as the server-page bulk delete).
+  armOrRun('exp-del:' + owner + ':' + items.length, btn, 'Delete ' + items.length + '?', async () => {
+    let deleted = 0; const failed = [];
+    for (const serverId of Object.keys(byServer)) {
+      try {
+        const j = await api('/api/server/' + serverId + '/bulk-delete-key', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({items: byServer[serverId]})});
+        (j.deleted || []).forEach(name => {
+          const proto = (byServer[serverId].find(i => i.name === name) || {}).protocol || 'outline';
+          EXP_SEL.delete(expSelKey(serverId, proto, name));
+          applyKeyPatch(parseInt(serverId, 10), name, {remove: true}, true);
+          deleted++;
+        });
+        (j.failed || []).forEach(f => failed.push(f.name));
+      } catch (e) { byServer[serverId].forEach(i => failed.push(i.name)); }
+    }
+    // one re-render for the whole batch (applyKeyPatch was deferred)
+    renderServers();
+    updateExpSelBars();
+    toast('Deleted ' + deleted + ' expired keys' + (failed.length ? ' • ' + failed.length + ' failed' : ''));
+  });
 }
 async function globalSearch() {
   const q = document.getElementById('q').value.trim();
@@ -652,8 +797,11 @@ async function silentReloadServer(serverId) {
     }
   } catch (e) { /* ignore — local rows already show the result */ }
 }
-function applyKeyPatch(serverId, oldName, patch) {
+function applyKeyPatch(serverId, oldName, patch, skipRender) {
   // patch: {name?, expiry?, expiry_h?, gb?, limit?, used?, enable?, status?, created_at?, remove?}
+  // skipRender (v6.1.2): the expired-section bulk delete patches many
+  // keys at once and re-renders once itself — per-key re-renders would
+  // rebuild the whole dashboard list for every deleted key.
   const now = Date.now() / 1000;
   if (typeof ALL_CLIENTS !== 'undefined' && document.getElementById('client-list')) {
     if (patch.remove) {
@@ -713,22 +861,32 @@ function applyKeyPatch(serverId, oldName, patch) {
       return arr;
     };
     const isExpired = (c) => (c.expiry && c.expiry <= now) || (c.limit && c.used >= c.limit);
-    let d3 = 0, dL = 0, dX = 0;
-    Object.values(OV_BY_OWNER).forEach(o => {
+    // one bucket's three lists: apply the patch, drop rows that no
+    // longer belong, and decrement that bucket's TRUE totals by the
+    // same counts. Returns [d3, dL, dX] (rows lost per list).
+    const patchLists = (o) => {
       const n3 = o.expiring.length, nL = o.low_gb.length, nX = o.expired.length;
       o.expiring = patchOne(o.expiring).filter(c => c.expiry && c.expiry - now <= 3 * 86400 && !isExpired(c));
       o.low_gb = patchOne(o.low_gb).filter(c => c.limit && c.limit - c.used > 0 &&
         c.limit - c.used <= 10 * 1073741824 && !isExpired(c));
       o.expired = patchOne(o.expired).filter(isExpired);
-      d3 += n3 - o.expiring.length;
-      dL += nL - o.low_gb.length;
-      dX += nX - o.expired.length;
+      const d = [n3 - o.expiring.length, nL - o.low_gb.length, nX - o.expired.length];
       if (o.totals) {
-        o.totals.expiring_3d = Math.max(0, (o.totals.expiring_3d || 0) - (n3 - o.expiring.length));
-        o.totals.low_gb = Math.max(0, (o.totals.low_gb || 0) - (nL - o.low_gb.length));
-        o.totals.expired = Math.max(0, (o.totals.expired || 0) - (nX - o.expired.length));
+        o.totals.expiring_3d = Math.max(0, (o.totals.expiring_3d || 0) - d[0]);
+        o.totals.low_gb = Math.max(0, (o.totals.low_gb || 0) - d[1]);
+        o.totals.expired = Math.max(0, (o.totals.expired || 0) - d[2]);
       }
+      return d;
+    };
+    let d3 = 0, dL = 0, dX = 0;
+    Object.values(OV_BY_OWNER).forEach(o => {
+      const d = patchLists(o);
+      d3 += d[0]; dL += d[1]; dX += d[2];
     });
+    // v6.1.2: the TOTAL aggregate lists are the merged per-owner lists
+    // — patch them the same way so the Total sections stay in sync
+    // (their totals decrement by the same rows removed there).
+    if (OV_TOTAL) patchLists(OV_TOTAL);
     if (OV_STATS) {
       OV_STATS.expiring_3d = Math.max(0, (OV_STATS.expiring_3d || 0) - d3);
       OV_STATS.low_gb = Math.max(0, (OV_STATS.low_gb || 0) - dL);
@@ -741,7 +899,7 @@ function applyKeyPatch(serverId, oldName, patch) {
     Object.values(OV_BY_OWNER).forEach(o => {
       (o.expiring || []).forEach(c => { EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1; });
     });
-    renderServers();
+    if (!skipRender) renderServers();
   }
 }
 async function loadServerPage() {
