@@ -550,3 +550,10 @@ nav.bottom a.on { box-shadow: 0 0 0 2px #fff; }
 nav.bottom a.nav-servers { background: var(--emerald); color: var(--bg); }
 nav.bottom a.nav-search { background: #38bdf8; color: var(--bg); }
 nav.bottom a.nav-settings { background: #a855f7; color: #fff; }
+
+/* ---- v6.1.2 ---- */
+/* Resellers have no bottom nav (admin-only, see base.html), so the
+   110px bottom padding that clears the fixed nav would be dead space
+   on their pages — and the toast's 90px bottom offset would float it. */
+body[data-role="reseller"] main { padding-bottom: 24px; }
+body[data-role="reseller"] #toast { bottom: 24px; }
