@@ -150,12 +150,12 @@ main { max-width: 720px; margin: 0 auto; padding: 16px 16px 110px; }
 @media (max-width: 560px) {
   .server {
     display: grid;
-    grid-template-columns: 46px minmax(0, 1fr) auto;
+    grid-template-columns: 46px minmax(0, 1fr) auto auto;
     column-gap: 12px;
     row-gap: 10px;
     align-items: center;
   }
-  /* L1: flag + name (one line, ellipsis if ever too long) + chevron */
+  /* L1: flag + name (one line, ellipsis if ever too long) + Edit + chevron */
   .server .flag { grid-column: 1; grid-row: 1; }
   .server .grow { display: contents; }
   .server .grow > b {
@@ -163,21 +163,23 @@ main { max-width: 720px; margin: 0 auto; padding: 16px 16px 110px; }
     display: block; min-width: 0;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  /* v6.1.10: Edit pill (col 3) beside the name, before the chevron */
+  .server .srv-edit { grid-column: 3; grid-row: 1; align-self: center; }
   .server .chev.chev-l3 {
-    grid-column: 3; grid-row: 1;
+    grid-column: 4; grid-row: 1;
     align-self: center; justify-self: end;
   }
   /* L2: meta (left) + GB (right) — separate grid cells, never overlap */
   .server .grow .muted { grid-column: 1 / 3; grid-row: 2; }
   .server .used {
-    grid-column: 3; grid-row: 2;
+    grid-column: 3 / 5; grid-row: 2;
     display: flex; align-items: center; gap: 6px; justify-self: end;
   }
   /* L3: usage bar, full width (cyan fill unchanged) */
   .server .serverbar { grid-column: 1 / -1; grid-row: 3; }
   /* L4: online (left) + Key button (right) */
   .server .srv-online { grid-column: 1 / 3; grid-row: 4; text-align: left; }
-  .server .keybtn { grid-column: 3; grid-row: 4; justify-self: end; }
+  .server .keybtn { grid-column: 3 / 5; grid-row: 4; justify-self: end; }
 }
 
 /* client rows */
@@ -388,8 +390,14 @@ nav.bottom a.on { color: var(--emerald); font-weight: 700; }
 .chip-btn.sel { background: var(--emerald); color: var(--bg); border-color: var(--emerald); }
 .chip-btn.sel.blue { background: #38bdf8; border-color: #38bdf8; }
 
-/* per-key action buttons */
-.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+/* v6.1.10: key-card action buttons in a 3-column grid — link
+   buttons (Outline / Vless-WS / Vless-XHTTP) on row 1, Renew /
+   Swap / Disable on row 2, Edit / Delete on row 3. Buttons are
+   small enough that the longest label ("Vless-XHTTP") fits at
+   360px (12px font under 560px); labels never wrap or overflow. */
+.actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.actions .btn { min-width: 0; padding: 7px 6px; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 560px) { .actions .btn { font-size: 12px; } }
 .btn.sm { padding: 7px 14px; font-size: 14px; border-radius: 18px; }
 .btn.sm.red { color: var(--red); border-color: rgba(239,68,68,.5); }
 .client.expiring-today { border-color: var(--red); }
@@ -660,8 +668,31 @@ body[data-role="reseller"] #toast { bottom: 24px; }
 /* v6.1.4 — per-server online count on dashboard server rows:
    "● N online" green bold + "of N keys" small grey, on the row's
    right next to the grey chevron. Same live source as the Total
-   online strip; the row wraps on narrow phones (flex-wrap). */
-.server .srv-online { text-align: right; flex: none; }
+   online strip; the row wraps on narrow phones (flex-wrap).
+   v6.1.10: the two lines are LEFT-aligned (was right) — on the
+   mobile 4-line grid the online block must sit flush-left at the
+   card's left edge (line 4), and this later rule was overriding
+   the media query's text-align:left (same specificity, later
+   wins), which is why v6.1.9 showed it center/right next to
+   + Key. The block's POSITION on desktop is unchanged (right
+   side, next to Key); only the lines' alignment changes. */
+.server .srv-online { text-align: left; flex: none; }
 .server .srv-online .n { font-size: 14px; font-weight: 800; color: #4ade80; white-space: nowrap; }
 .server .srv-online .n .dot { width: 8px; height: 8px; display: inline-block; margin-right: 5px; vertical-align: 1px; }
 .server .srv-online .lbl { font-size: 11px; color: var(--muted); }
+
+/* ---- v6.1.10 ---- */
+/* Server-row Edit pill (Item 4): small outlined button on line 1 of
+   every server row, beside the name, before the chevron. Flex item
+   on desktop; grid cell (col 3, row 1) on narrow phones. The
+   .btn.ghost.sm classes give it the outlined-pill look. */
+.server .srv-edit { flex: none; white-space: nowrap; }
+/* "+" button on country-group headers (Item 5, admin only): opens
+   the add-server form with that country pre-filled. Sits between
+   the group meta and the expand chevron. */
+.group-h .group-add {
+  flex: none; width: 34px; height: 34px; border-radius: 50%;
+  border: 2px solid #38bdf8; background: transparent; color: #38bdf8;
+  font-size: 20px; font-weight: 800; line-height: 1; margin-left: 8px;
+}
+.group-h .group-add:hover { background: rgba(56, 189, 248, .12); }
