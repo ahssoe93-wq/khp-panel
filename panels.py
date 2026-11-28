@@ -187,6 +187,77 @@ def client_status(enable, expiry_unix, used, limit):
     return "active"
 
 
+def merge_xui_clients(outline, vless):
+    """v6.1.5: one record per customer (email) across Outline + VLESS.
+
+    A customer who holds BOTH an Outline key and a VLESS key on the
+    same server used to count as TWO keys everywhere (dashboard totals,
+    server rows, expiring/expired/low lists, online count) — e.g.
+    STH-PREMIUM10 showed 200 for 100 real customers. Merge rule (same
+    as the existing VLESS dedup across vless inbounds): expiry = max,
+    limit = max, used = max, enable = AND, status from the merged
+    values. The merged record keeps both sub-records ("outline" /
+    "vless") plus both identities (Outline "id", VLESS "uuid") so key
+    actions can reach both sides, and "protocol" is "both", "outline"
+    or "vless" (with "protocols" listing the sides present). Order:
+    Outline order first, then VLESS-only names in VLESS order."""
+    by_name = {}
+    order = []
+    for c in outline or []:
+        name = c.get("name") or ""
+        if not name:
+            continue
+        if name not in by_name:
+            by_name[name] = {"outline": None, "vless": None}
+            order.append(name)
+        by_name[name]["outline"] = c
+    for c in vless or []:
+        name = c.get("name") or ""
+        if not name:
+            continue
+        if name not in by_name:
+            by_name[name] = {"outline": None, "vless": None}
+            order.append(name)
+        by_name[name]["vless"] = c
+    merged = []
+    for name in order:
+        ol = by_name[name]["outline"]
+        vl = by_name[name]["vless"]
+        sides = [s for s in (ol, vl) if s is not None]
+        enable = all(bool(s.get("enable", True)) for s in sides)
+        used = max((s.get("used") or 0) for s in sides)
+        limit = max((s.get("limit") or 0) for s in sides)
+        expiry = max((s.get("expiry") or 0) for s in sides)
+        online = None
+        if any(s.get("online") is True for s in sides):
+            online = True
+        elif any(s.get("online") is False for s in sides):
+            online = False
+        rec = {
+            "name": name,
+            "enable": enable,
+            "used": used,
+            "limit": limit,
+            "expiry": expiry,
+            "status": client_status(enable, expiry, used, limit),
+            "protocol": ("both" if (ol and vl) else
+                         "outline" if ol else "vless"),
+            "protocols": (["outline"] if ol else []) +
+                         (["vless"] if vl else []),
+            "outline": ol,
+            "vless": vl,
+            "id": (ol or {}).get("id"),
+            "uuid": (vl or {}).get("uuid"),
+            "method": (ol or {}).get("method",
+                                     "chacha20-ietf-poly1305"),
+            "password": (ol or {}).get("password", ""),
+        }
+        if online is not None:
+            rec["online"] = online
+        merged.append(rec)
+    return merged
+
+
 class PanelError(Exception):
     pass
 
@@ -445,6 +516,196 @@ class XuiClient:
                                                   rec["expiry"],
                                                   rec["used"], rec["limit"])
         return [merged[u] for u in order]
+
+    def list_merged_clients(self):
+        """v6.1.5: one record per customer (email) across Outline +
+        VLESS — the list the dashboard, server page, search and export
+        all render. A dual-protocol customer appears ONCE (protocol
+        "both"); Outline-only / VLESS-only customers appear as before
+        (protocol "outline" / "vless")."""
+        return merge_xui_clients(self.list_clients(),
+                                 self.list_vless_clients())
+
+    def get_merged_client(self, email):
+        """Merged record by email, or None."""
+        for c in self.list_merged_clients():
+            if c["name"] == email:
+                return c
+        return None
+
+    def _merged_sides(self, email):
+        """(has_outline, has_vless) for one email — which underlying
+        records a dual action must touch."""
+        cur = self.get_merged_client(email)
+        if not cur:
+            raise PanelError("client not found: %s" % email)
+        return cur, bool(cur.get("outline")), bool(cur.get("vless"))
+
+    def _apply_both(self, email, outline_fn, vless_fn, what):
+        """v6.1.5: run a dual action on both sides that exist. Each
+        side is attempted; a side that fails but whose record is GONE
+        anyway (e.g. the panel's delete already removed both) counts
+        as done. Anything still present after a failure raises, naming
+        the side — the row then visibly splits (old name on the failed
+        side), never silently half-done."""
+        cur, has_ol, has_vl = self._merged_sides(email)
+        errors = []
+        if has_ol:
+            try:
+                outline_fn()
+            except Exception as exc:  # noqa: BLE001
+                if self.get_client(email) is not None:
+                    errors.append("outline: %s" % exc)
+        if has_vl:
+            try:
+                vless_fn()
+            except Exception as exc:  # noqa: BLE001
+                if self.get_vless_client(email) is not None:
+                    errors.append("vless: %s" % exc)
+        if errors:
+            raise PanelError("%s partially failed for %s — %s"
+                             % (what, email, "; ".join(errors)))
+        got = self.get_merged_client(email)
+        return got
+
+    def renew_merged_client(self, email, months):
+        """v6.1.5: renew BOTH sides (same new name + expiry, computed
+        once so the two records can never diverge). GB unchanged.
+        Returns (merged_record, new_name)."""
+        cur, has_ol, has_vl = self._merged_sides(email)
+        _base, old_date = parse_name_date(email)
+        if old_date is None:
+            if not cur.get("expiry"):
+                raise PanelError("renew: no expiry date on %s" % email)
+            old_date = (datetime.fromtimestamp(cur["expiry"], MM)
+                        - timedelta(days=1)).date()
+        new_name, new_date = renew_name_and_date(email, old_date, months)
+        new_exp_ms = int((datetime(new_date.year, new_date.month,
+                                   new_date.day, tzinfo=MM)
+                          + timedelta(days=1)).timestamp() * 1000)
+        if has_ol:
+            self.update_client(email, email=new_name,
+                               expiryTime=new_exp_ms)
+        if has_vl:
+            self.update_vless_client(email, email=new_name,
+                                     expiryTime=new_exp_ms)
+        got = self.get_merged_client(new_name)
+        if not got:
+            raise PanelError("renew: client not found on panel after "
+                             "update")
+        return got, new_name
+
+    def swap_merged_client(self, email):
+        """v6.1.5: swap BOTH sides — fresh Outline password + fresh
+        VLESS UUID, same name / expiry / GB. Returns the merged
+        record."""
+        cur, has_ol, has_vl = self._merged_sides(email)
+        errors = []
+        if has_ol:
+            try:
+                self.swap_client(email)
+            except Exception as exc:  # noqa: BLE001
+                errors.append("outline: %s" % exc)
+        if has_vl:
+            try:
+                self.swap_vless_client(email)
+            except Exception as exc:  # noqa: BLE001
+                errors.append("vless: %s" % exc)
+        if errors:
+            raise PanelError("swap partially failed for %s — %s"
+                             % (email, "; ".join(errors)))
+        got = self.get_merged_client(email)
+        if not got:
+            raise PanelError("swap: client not found on panel after swap")
+        return got
+
+    def toggle_merged_client(self, email, enable):
+        """v6.1.5: enable/disable BOTH sides."""
+        self._apply_both(
+            email,
+            lambda: self.update_client(email, enable=bool(enable)),
+            lambda: self.update_vless_client(email, enable=bool(enable)),
+            "toggle")
+        return self.get_merged_client(email)
+
+    def set_gb_merged_client(self, email, total_gb_bytes):
+        """v6.1.5: set the GB limit on BOTH sides."""
+        self._apply_both(
+            email,
+            lambda: self.update_client(email,
+                                       totalGB=int(total_gb_bytes)),
+            lambda: self.update_vless_client(email,
+                                             totalGB=int(total_gb_bytes)),
+            "set GB")
+        return self.get_merged_client(email)
+
+    def edit_merged_client(self, email, gb_bytes=None, new_date=None):
+        """v6.1.5: edit GB and/or expiry on BOTH sides (a date change
+        RENAMES both records to the same new date). Returns
+        (merged_record, new_name)."""
+        cur, has_ol, has_vl = self._merged_sides(email)
+        changes = {}
+        new_name = email
+        if new_date is not None:
+            _base, old_date = parse_name_date(email)
+            if old_date is None:
+                if not cur.get("expiry"):
+                    raise PanelError("edit: no expiry date on %s" % email)
+                old_date = (datetime.fromtimestamp(cur["expiry"], MM)
+                            - timedelta(days=1)).date()
+            if new_date != old_date:
+                new_name = rename_to_date(email, new_date)
+                changes["email"] = new_name
+                changes["expiryTime"] = xui_expiry_ms(new_date)
+        if gb_bytes is not None:
+            changes["totalGB"] = int(gb_bytes)
+        if not changes:
+            return cur, email
+        errors = []
+        if has_ol:
+            try:
+                self.update_client(email, **changes)
+            except Exception as exc:  # noqa: BLE001
+                errors.append("outline: %s" % exc)
+        if has_vl:
+            try:
+                self.update_vless_client(email, **changes)
+            except Exception as exc:  # noqa: BLE001
+                errors.append("vless: %s" % exc)
+        if errors:
+            raise PanelError("edit partially failed for %s — %s"
+                             % (email, "; ".join(errors)))
+        got = self.get_merged_client(new_name)
+        if not got:
+            raise PanelError("edit: client not found on panel after "
+                             "update")
+        return got, new_name
+
+    def delete_merged_client(self, email):
+        """v6.1.5: delete BOTH sides. The panel's /clients/del/{email}
+        removes the email from every inbound, so the second delete may
+        find its side already gone — that counts as done, not a
+        failure. Verifies the merged record is gone."""
+        cur, has_ol, has_vl = self._merged_sides(email)
+        errors = []
+        if has_ol:
+            try:
+                self.delete_client(email)
+            except Exception as exc:  # noqa: BLE001
+                if self.get_client(email) is not None:
+                    errors.append("outline: %s" % exc)
+        if has_vl:
+            try:
+                self.delete_vless_client(email)
+            except Exception as exc:  # noqa: BLE001
+                if self.get_vless_client(email) is not None:
+                    errors.append("vless: %s" % exc)
+        if errors:
+            raise PanelError("delete partially failed for %s — %s"
+                             % (email, "; ".join(errors)))
+        if self.get_merged_client(email) is not None:
+            raise PanelError("delete: client still on panel after delete")
+        return True
 
     def get_vless_client(self, email):
         """Merged VLESS record by email, or None."""
@@ -929,14 +1190,13 @@ class XuiClient:
     def health(self):
         """Login + list. Returns (online, client_count, used_total_bytes,
         limit_total_bytes) — the limit total feeds the dashboard usage bar.
-        Counts Outline + VLESS keys (VLESS deduped by UUID)."""
-        clients = self.list_clients()
-        vless = self.list_vless_clients()
-        used = (sum(c["used"] for c in clients)
-                + sum(c["used"] for c in vless))
-        limit = (sum(c["limit"] or 0 for c in clients)
-                 + sum(c["limit"] or 0 for c in vless))
-        return True, len(clients) + len(vless), used, limit
+        v6.1.5: counts MERGED customers (one per email), not Outline +
+        VLESS records — a dual-protocol customer used to count twice
+        here too (and its used/limit twice in the bar totals)."""
+        clients = self.list_merged_clients()
+        used = sum(c["used"] for c in clients)
+        limit = sum(c["limit"] or 0 for c in clients)
+        return True, len(clients), used, limit
 
 
 # ---------------------------------------------------------------- Marzban
