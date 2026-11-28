@@ -587,3 +587,14 @@ body[data-role="reseller"] #toast { bottom: 24px; }
    button. (Inputs default to width:100% in this stylesheet, so the
    picker needs an explicit width.) */
 .ren-month { width: auto; flex: none; padding: 7px 10px; font-size: 14px; }
+/* v6.1.3 + chevron update: expand-arrow hierarchy — parent vs child
+   arrows differ in colour AND size (colour matters most). L1 owner
+   groups (MY SERVERS / OTHER) green 18px; L2 country + channel
+   groups blue 14px; L3 server rows grey 13px. Triple-class selectors
+   so these win over the plain .chev rules regardless of order.
+   Nothing is made smaller than the old 14px chevrons: L1 grows,
+   L2 stays 14px, L3 is new (server rows had no arrow before).
+   Section-header chevrons (.sec-head .chev) are NOT touched. */
+.group-h .chev.chev-l1 { color: #00ff81; font-size: 18px; }
+.group-h .chev.chev-l2, .person-h .chev.chev-l2 { color: #38bdf8; font-size: 14px; }
+.server .chev.chev-l3 { color: #94a3b8; font-size: 13px; flex: none; }
