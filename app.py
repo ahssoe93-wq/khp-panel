@@ -119,6 +119,21 @@ def init_db():
                       role TEXT NOT NULL DEFAULT 'reseller',
                       display_name TEXT NOT NULL DEFAULT '',
                       created_at INTEGER NOT NULL)""")
+    # v6.1.6: per-user, per-protocol price/GB presets — one row per
+    # tier. (username, protocol, months, gb) is the key on purpose:
+    # MK's VLESS line has THREE 1M tiers (100/150/200 GB), so months
+    # alone cannot be the key. price_ks is display-only.
+    db.execute("""CREATE TABLE IF NOT EXISTS user_presets (
+                      username TEXT NOT NULL,
+                      protocol TEXT NOT NULL,
+                      months INTEGER NOT NULL,
+                      gb INTEGER NOT NULL,
+                      price_ks INTEGER NOT NULL DEFAULT 0,
+                      PRIMARY KEY (username, protocol, months, gb))""")
+    # v6.1.6: SBH's channel name was misspelled SHILED — fix the
+    # stored display name (user decision 2026-11-28).
+    db.execute("UPDATE users SET display_name='SBH - NET SHIELD' "
+               "WHERE display_name='SBH - NET SHILED'")
     # v4: keys created through THIS panel, so the server page can sort
     # "Newest" first and show a NEW badge. Keys created elsewhere (or
     # before v4) have no row here and sort after, by expiry.
@@ -272,7 +287,149 @@ def set_user_display_name(username, display_name):
 def delete_user(username):
     db = get_db()
     db.execute("DELETE FROM users WHERE username=?", (username,))
+    db.execute("DELETE FROM user_presets WHERE username=?", (username,))
     db.commit()
+
+
+# ---------------------------------------------------------------- v6.1.6: per-user price/GB presets
+# Seed values (months, GB, price in Ks) — the user's own tiers plus
+# the six resellers' tiers as given 2026-11-28. "vless": None means
+# "copy the Outline tiers" (only MK sells VLESS on different tiers).
+DEFAULT_PRESETS = {
+    "admin": {"outline": [(1, 400, 4000), (2, 1000, 7000),
+                          (3, 1500, 10000)], "vless": None},
+    "sth28": {"outline": [(1, 200, 5000), (2, 600, 10000),
+                          (3, 1000, 15000)], "vless": None},
+    "sbh04": {"outline": [(1, 300, 5000), (2, 700, 10000),
+                          (3, 1100, 15000), (4, 1500, 20000),
+                          (5, 1900, 25000), (6, 2300, 30000)],
+              "vless": None},
+    "www93": {"outline": [(1, 250, 5000), (2, 500, 9500),
+                          (3, 750, 13500), (6, 1500, 25000)],
+              "vless": None},
+    "xxx09": {"outline": [(1, 300, 5000), (2, 700, 9000),
+                          (3, 1100, 13000), (4, 1500, 17000)],
+              "vless": None},
+    "mt95": {"outline": [(1, 300, 6000)], "vless": None},
+    "mk10": {"outline": [(1, 300, 5000), (2, 700, 9500),
+                         (3, 1100, 14000), (4, 1500, 18000)],
+             "vless": [(1, 100, 4000), (1, 150, 5000), (1, 200, 6000)]},
+}
+# A user nobody seeded yet (e.g. a reseller added later) gets the
+# admin's tiers — the admin can change them in Settings → Users.
+GENERIC_PRESETS = DEFAULT_PRESETS["admin"]
+
+
+def _seed_user_presets(db, username):
+    """Insert the seed tiers for a user that has no preset rows yet.
+    VLESS seeds copy the Outline tiers unless the seed says otherwise.
+    Idempotent: a user with ANY preset row is left alone, so admin
+    edits survive reinstalls (the DB is preserved)."""
+    have = db.execute(
+        "SELECT COUNT(*) FROM user_presets WHERE username=?",
+        (username,)).fetchone()[0]
+    if have:
+        return
+    seed = DEFAULT_PRESETS.get(username) or GENERIC_PRESETS
+    for protocol in ("outline", "vless"):
+        tiers = seed.get(protocol)
+        if tiers is None:
+            tiers = seed["outline"]
+        for months, gb, price in tiers:
+            db.execute(
+                "INSERT OR IGNORE INTO user_presets "
+                "(username, protocol, months, gb, price_ks) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (username, protocol, months, gb, price))
+
+
+def ensure_user_presets(username):
+    db = get_db()
+    _seed_user_presets(db, username)
+    db.commit()
+
+
+def get_user_presets(username):
+    """{protocol: [{months, gb, price}]} sorted by months, then GB.
+    Lazily seeds the defaults on first read."""
+    ensure_user_presets(username)
+    rows = get_db().execute(
+        "SELECT protocol, months, gb, price_ks FROM user_presets "
+        "WHERE username=? ORDER BY protocol, months, gb",
+        (username,)).fetchall()
+    out = {"outline": [], "vless": []}
+    for r in rows:
+        out[r["protocol"]].append({"months": r["months"], "gb": r["gb"],
+                                   "price": r["price_ks"]})
+    return out
+
+
+def validate_preset_tiers(tiers):
+    """A protocol's tier list: 1..6 tiers, months 1..12, GB > 0,
+    price >= 0, no duplicate (months, GB) pair. Returns the cleaned
+    list of (months, gb, price) tuples or raises ValueError."""
+    if not isinstance(tiers, list) or not 1 <= len(tiers) <= 6:
+        raise ValueError("each protocol needs 1..6 tiers")
+    seen, clean = set(), []
+    for t in tiers:
+        if not isinstance(t, dict):
+            raise ValueError("each tier needs months, gb and price")
+        try:
+            months = int(t["months"])
+            gb = int(t["gb"])
+            price = int(t["price"])
+        except (TypeError, ValueError, KeyError):
+            raise ValueError("each tier needs months, gb and price")
+        if not 1 <= months <= 12:
+            raise ValueError("months must be 1..12")
+        if gb <= 0 or gb > 100000:
+            raise ValueError("gb must be a positive number")
+        if price < 0 or price > 100000000:
+            raise ValueError("price must be 0 or more")
+        if (months, gb) in seen:
+            raise ValueError("duplicate tier (months + GB)")
+        seen.add((months, gb))
+        clean.append((months, gb, price))
+    clean.sort(key=lambda x: (x[0], x[1]))
+    return clean
+
+
+def set_user_presets(username, outline, vless):
+    """Replace one or both protocols' tiers for a user. A protocol
+    passed as None is left unchanged."""
+    db = get_db()
+    for protocol, tiers in (("outline", outline), ("vless", vless)):
+        if tiers is None:
+            continue
+        clean = validate_preset_tiers(tiers)
+        db.execute("DELETE FROM user_presets WHERE username=? "
+                   "AND protocol=?", (username, protocol))
+        for months, gb, price in clean:
+            db.execute(
+                "INSERT INTO user_presets (username, protocol, months, "
+                "gb, price_ks) VALUES (?, ?, ?, ?, ?)",
+                (username, protocol, months, gb, price))
+    db.commit()
+
+
+def resolve_preset_gb(username, protocol, months, gb=None):
+    """Resolve the GB for a key create. Returns (gb, is_preset).
+    gb is the tier's GB when (months, gb) matches a preset tier, or
+    the single tier for that month; a GB that matches no tier is a
+    custom GB (is_preset False); None when the month has no tier and
+    no GB was given (ambiguous or missing — e.g. MK's three 1M VLESS
+    tiers with months alone)."""
+    tiers = get_user_presets(username).get(protocol, [])
+    if gb is not None:
+        gb = int(gb) if float(gb).is_integer() else gb
+        for t in tiers:
+            if t["months"] == months and t["gb"] == gb:
+                return gb, True
+        return gb, False
+    matches = [t for t in tiers if t["months"] == months]
+    if len(matches) == 1:
+        return matches[0]["gb"], True
+    return None, False
 
 
 def user_check(username, password):
@@ -726,10 +883,23 @@ def api_add_key(server_id):
         except ValueError:
             return jsonify({"ok": False,
                             "error": "expiry_date must be YYYY-MM-DD"}), 400
-    months = int(data.get("months") or 1)
-    if months not in MONTHS_GB:
-        return jsonify({"ok": False, "error": "months must be 1, 2 or 3"}), 400
-    gb = custom_gb if custom_gb is not None else MONTHS_GB[months]
+    try:
+        months = int(data.get("months") or 1)
+    except (TypeError, ValueError):
+        months = 0
+    if not 1 <= months <= 12:
+        return jsonify({"ok": False, "error": "months must be 1..12"}), 400
+    # v6.1.6: the GB comes from the caller's own preset tier for this
+    # protocol; a GB matching no tier is a custom GB. months with no
+    # tier and no GB (e.g. MK's three 1M VLESS tiers, months alone)
+    # cannot resolve and must pick a tier / enter a GB.
+    gb, is_preset = resolve_preset_gb(current_user()["username"],
+                                      "outline", months, custom_gb)
+    if gb is None:
+        return jsonify({"ok": False,
+                        "error": "months is not one of your presets — "
+                                 "pick a preset tier or enter a custom "
+                                 "GB"}), 400
     total_bytes = (GB_BYTES[int(gb)] if float(gb).is_integer()
                    and int(gb) in GB_BYTES else int(gb * 1073741824))
     # explicit full name override (testing / advanced); otherwise build from
@@ -771,17 +941,17 @@ def api_add_key(server_id):
     note_key_created(server_id, name)
     HEALTH_CACHE.pop(server_id, None)
     gb_disp = str(int(gb)) if float(gb).is_integer() else str(gb)
-    if custom_gb is not None or custom_date is not None:
-        summary = "%s GB • exp %s" % (gb_disp, exp_date.isoformat())
+    if is_preset and custom_date is None:
+        summary = "%dM • %s GB • exp %s" % (months, gb_disp,
+                                            exp_date.isoformat())
     else:
-        summary = "%d mo • %s GB • exp %s" % (months, gb_disp,
-                                              exp_date.isoformat())
+        summary = "%s GB • exp %s" % (gb_disp, exp_date.isoformat())
     return jsonify({"ok": True, "name": name, "link": link,
                     "expiry": exp_date.isoformat(), "expiry_ts": exp_ts,
                     "expiry_h": exp_date.strftime("%d %b %Y"),
                     "gb": gb, "months": months,
                     "limit": total_bytes, "created_at": int(time.time()),
-                    "custom": bool(custom_gb is not None
+                    "custom": bool(not is_preset
                                   or custom_date is not None),
                     "summary": summary})
 
@@ -839,16 +1009,19 @@ def _merged_links(client, rec):
            methods=["POST"])
 @login_required
 def api_renew_key(server_id, name):
-    """Renew +1/+2/+3 months: new expiry = old expiry + 30/60/90 days.
+    """Renew +1..+6 months: new expiry = old expiry + 30..180 days.
     The key is RENAMED to the new date (the name encodes the expiry) and
     the expiry moves in the same update call. GB is unchanged."""
     server, err = _key_action_server(server_id)
     if err:
         return err
     data = request.get_json(force=True, silent=True) or {}
-    months = int(data.get("months") or 1)
-    if months not in (1, 2, 3):
-        return jsonify({"ok": False, "error": "months must be 1, 2 or 3"}), 400
+    try:
+        months = int(data.get("months") or 1)
+    except (TypeError, ValueError):
+        months = 0
+    if not 1 <= months <= 6:
+        return jsonify({"ok": False, "error": "months must be 1..6"}), 400
     try:
         client = make_client(server)
         if server["type"] == "xui":
@@ -1506,10 +1679,21 @@ def api_add_vless_key(server_id):
         except ValueError:
             return jsonify({"ok": False,
                             "error": "expiry_date must be YYYY-MM-DD"}), 400
-    months = int(data.get("months") or 1)
-    if months not in MONTHS_GB:
-        return jsonify({"ok": False, "error": "months must be 1, 2 or 3"}), 400
-    gb = custom_gb if custom_gb is not None else MONTHS_GB[months]
+    try:
+        months = int(data.get("months") or 1)
+    except (TypeError, ValueError):
+        months = 0
+    if not 1 <= months <= 12:
+        return jsonify({"ok": False, "error": "months must be 1..12"}), 400
+    # v6.1.6: GB from the caller's own VLESS preset tier (see
+    # resolve_preset_gb); a GB matching no tier is a custom GB.
+    gb, is_preset = resolve_preset_gb(current_user()["username"],
+                                      "vless", months, custom_gb)
+    if gb is None:
+        return jsonify({"ok": False,
+                        "error": "months is not one of your presets — "
+                                 "pick a preset tier or enter a custom "
+                                 "GB"}), 400
     total_bytes = (GB_BYTES[int(gb)] if float(gb).is_integer()
                    and int(gb) in GB_BYTES else int(gb * 1073741824))
     full_name = (data.get("client_name") or "").strip()
@@ -1543,18 +1727,19 @@ def api_add_vless_key(server_id):
     note_key_created(server_id, name)
     HEALTH_CACHE.pop(server_id, None)
     gb_disp = str(int(gb)) if float(gb).is_integer() else str(gb)
-    if custom_gb is not None or custom_date is not None:
-        summary = "VLESS • %s GB • exp %s" % (gb_disp, exp_date.isoformat())
-    else:
-        summary = "VLESS • %d mo • %s GB • exp %s" % (
+    if is_preset and custom_date is None:
+        summary = "VLESS • %dM • %s GB • exp %s" % (
             months, gb_disp, exp_date.isoformat())
+    else:
+        summary = "VLESS • %s GB • exp %s" % (gb_disp,
+                                              exp_date.isoformat())
     return jsonify({"ok": True, "name": name, "links": links,
                     "link": links["primary"],
                     "expiry": exp_date.isoformat(), "expiry_ts": exp_ts,
                     "expiry_h": exp_date.strftime("%d %b %Y"),
                     "gb": gb, "months": months,
                     "limit": total_bytes, "created_at": int(time.time()),
-                    "custom": bool(custom_gb is not None
+                    "custom": bool(not is_preset
                                   or custom_date is not None),
                     "summary": summary})
 
@@ -1564,11 +1749,12 @@ def api_add_vless_key(server_id):
 @login_required
 def api_bulk_add_key(server_id):
     """Create N keys at once: {base}-{i}___DD_MM_YYYY, i = 1..N.
-    Same months -> GB (1=400, 2=1000, 3=1500) and expiry rules as the
-    single add-key routes; custom gb / expiry_date override the preset.
-    protocol "vless" (3X-UI only) gives each key the same-UUID-on-all-
-    VLESS-inbounds treatment as a single VLESS create. Creates stop at
-    the first failure and the response lists what was already made."""
+    The GB comes from the caller's own preset tier for the chosen
+    protocol and months (v6.1.6); custom gb / expiry_date override
+    the preset. protocol "vless" (3X-UI only) gives each key the
+    same-UUID-on-all-VLESS-inbounds treatment as a single VLESS
+    create. Creates stop at the first failure and the response lists
+    what was already made."""
     server, err = _owned_server(server_id)
     if err:
         return err
@@ -1612,9 +1798,16 @@ def api_bulk_add_key(server_id):
         months = int(data.get("months") or 1)
     except (TypeError, ValueError):
         months = 0
-    if months not in MONTHS_GB:
-        return jsonify({"ok": False, "error": "months must be 1, 2 or 3"}), 400
-    gb = custom_gb if custom_gb is not None else MONTHS_GB[months]
+    if not 1 <= months <= 12:
+        return jsonify({"ok": False, "error": "months must be 1..12"}), 400
+    # v6.1.6: GB from the caller's own preset tier for this protocol.
+    gb, is_preset = resolve_preset_gb(current_user()["username"],
+                                      protocol, months, custom_gb)
+    if gb is None:
+        return jsonify({"ok": False,
+                        "error": "months is not one of your presets — "
+                                 "pick a preset tier or enter a custom "
+                                 "GB"}), 400
     total_bytes = (GB_BYTES[int(gb)] if float(gb).is_integer()
                    and int(gb) in GB_BYTES else int(gb * 1073741824))
     if custom_date:
@@ -1719,9 +1912,9 @@ def api_bulk_delete_key(server_id):
 def api_bulk_renew_key(server_id):
     """v6.1.3: renew several EXPIRING keys at once. Body:
     {"items": [{"name": ..., "protocol": "outline"|"vless"|"both"}],
-    "months": 1|2|3}. v6.1.5: protocol "both" renews BOTH sides of a
+    "months": 1..6}. v6.1.5: protocol "both" renews BOTH sides of a
     dual customer. Reuses the single-renew semantics per key (new
-    expiry = old + 30/60/90 days, key RENAMED to the new date, GB
+    expiry = old + 30..180 days, key RENAMED to the new date, GB
     unchanged; Marzban renew = DELETE+RECREATE). The UI asks for
     confirmation with the count + months before calling this.
     Per-key failures are reported in "failed" — the rest still renew.
@@ -1731,9 +1924,12 @@ def api_bulk_renew_key(server_id):
     if err:
         return err
     data = request.get_json(force=True, silent=True) or {}
-    months = int(data.get("months") or 1)
-    if months not in (1, 2, 3):
-        return jsonify({"ok": False, "error": "months must be 1, 2 or 3"}), 400
+    try:
+        months = int(data.get("months") or 1)
+    except (TypeError, ValueError):
+        months = 0
+    if not 1 <= months <= 6:
+        return jsonify({"ok": False, "error": "months must be 1..6"}), 400
     items = data.get("items") or data.get("names") or []
     if not isinstance(items, list) or not items or len(items) > 100:
         return jsonify({"ok": False,
@@ -1920,9 +2116,12 @@ def api_renew_vless_key(server_id, name):
     if err:
         return err
     data = request.get_json(force=True, silent=True) or {}
-    months = int(data.get("months") or 1)
-    if months not in (1, 2, 3):
-        return jsonify({"ok": False, "error": "months must be 1, 2 or 3"}), 400
+    try:
+        months = int(data.get("months") or 1)
+    except (TypeError, ValueError):
+        months = 0
+    if not 1 <= months <= 6:
+        return jsonify({"ok": False, "error": "months must be 1..6"}), 400
     try:
         client = make_client(server)
         rec, new_name = client.renew_vless_client(name, months)
@@ -2056,6 +2255,49 @@ USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{2,31}$")
 def api_users():
     # Never returns hashes — username / role / display name only.
     return jsonify({"ok": True, "users": list_users()})
+
+
+# ---------------------------------------------------------------- v6.1.6: presets API
+@app.route("/api/presets")
+@login_required
+def api_my_presets():
+    """The logged-in user's own presets (both protocols) — what the
+    Add Key / Bulk Create forms render. A user only ever sees their
+    own tiers."""
+    return jsonify({"ok": True,
+                    "presets": get_user_presets(current_user()["username"])})
+
+
+@app.route("/api/users/<username>/presets")
+@login_required
+@require_admin
+def api_get_user_presets(username):
+    if not get_user(username):
+        return jsonify({"ok": False, "error": "user not found"}), 404
+    return jsonify({"ok": True, "username": username,
+                    "presets": get_user_presets(username)})
+
+
+@app.route("/api/users/<username>/presets", methods=["PUT"])
+@login_required
+@require_admin
+def api_set_user_presets(username):
+    if not get_user(username):
+        return jsonify({"ok": False, "error": "user not found"}), 404
+    data = request.get_json(force=True, silent=True) or {}
+    # {outline: [...], vless: [...]} or {presets: {outline, vless}}.
+    body = data.get("presets") if isinstance(data.get("presets"),
+                                             dict) else data
+    if "outline" not in body and "vless" not in body:
+        return jsonify({"ok": False,
+                        "error": "outline and/or vless tiers needed"}), 400
+    try:
+        set_user_presets(username, body.get("outline"),
+                         body.get("vless"))
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    return jsonify({"ok": True, "username": username,
+                    "presets": get_user_presets(username)})
 
 
 @app.route("/api/users", methods=["POST"])
