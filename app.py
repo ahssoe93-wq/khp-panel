@@ -529,6 +529,16 @@ OVERVIEW_CACHE = {}
 LAST_SEEN = {}
 
 
+def invalidate_overview():
+    """v6.1.2: a delete changes the dashboard's key-overview scan, so
+    drop the cached payloads — otherwise the next quiet refresh (the
+    server cache lives 60s) would resurrect the deleted rows in the
+    dashboard sections and undo the client's in-place patch. The next
+    fetch re-scans the panels."""
+    OVERVIEW_CACHE.clear()
+    EXPIRING_CACHE.clear()
+
+
 def server_health(server, force=False):
     now = time.time()
     cached = HEALTH_CACHE.get(server["id"])
@@ -793,6 +803,7 @@ def api_delete_key(server_id):
         return jsonify({"ok": False, "error": str(exc)[:300]}), 502
     note_key_deleted(server_id, name)
     HEALTH_CACHE.pop(server_id, None)
+    invalidate_overview()  # v6.1.2: keep dashboard sections from resurrecting this row
     return jsonify({"ok": True, "name": name, "gone": True})
 
 
@@ -1116,6 +1127,14 @@ def api_key_overview():
         sections inside each owner/channel group from its own bucket, so
         a section header count is that owner's TRUE total and agrees
         with the stat cards; each list is capped at 100 rows.
+      total (v6.1.2): the same three lists MERGED across all visible
+        servers (the admin's 54; a reseller's own servers only), same
+        sort orders, same 100-row cap; totals are the TRUE global
+        counts (they agree with stats). The dashboard renders these as
+        the TOTAL EXPIRING / TOTAL LOW GB / TOTAL EXPIRED sections
+        below the MY SERVERS / OTHER groups (admin only). Built
+        server-side so the client never sums per-owner lists (it would
+        double-count the capped lists).
       expiring: not expired, expiry within 3 days (soonest first).
       low_gb: not expired, 0 < remaining <= 10 GB (least remaining first).
       expired: expiry passed OR used >= limit (most recently expired
@@ -1200,11 +1219,29 @@ def api_key_overview():
             "expiring": b["expiring"][:OVERVIEW_LIST_CAP],
             "low_gb": b["low_gb"][:OVERVIEW_LIST_CAP],
             "expired": b["expired"][:OVERVIEW_LIST_CAP]}
+    # v6.1.2: the "total" aggregate — the same three lists merged
+    # across ALL visible servers, same sort orders, same 100-row cap.
+    # The bucket lists are still the FULL (uncapped) lists here; the
+    # caps above only sliced copies into by_owner.
+    total_bucket = {
+        "totals": {"expiring_3d": n_expiring, "low_gb": n_low,
+                   "expired": n_expired},
+        "expiring": sorted(
+            (pc for b in buckets.values() for pc in b["expiring"]),
+            key=lambda r: r["expiry"])[:OVERVIEW_LIST_CAP],
+        "low_gb": sorted(
+            (pc for b in buckets.values() for pc in b["low_gb"]),
+            key=lambda r: r["remaining"])[:OVERVIEW_LIST_CAP],
+        "expired": sorted(
+            (pc for b in buckets.values() for pc in b["expired"]),
+            key=lambda r: r["expiry"],
+            reverse=True)[:OVERVIEW_LIST_CAP]}
     payload = {"ok": True,
                "stats": {"total": total, "active": active,
                          "expiring_3d": n_expiring, "low_gb": n_low,
                          "expired": n_expired},
-               "by_owner": by_owner}
+               "by_owner": by_owner,
+               "total": total_bucket}
     OVERVIEW_CACHE[owner_key()] = [now, payload]
     return jsonify(payload)
 
@@ -1576,6 +1613,7 @@ def api_bulk_delete_key(server_id):
         except Exception as exc:  # noqa: BLE001
             failed.append({"name": name, "error": str(exc)[:120]})
     HEALTH_CACHE.pop(server_id, None)
+    invalidate_overview()  # v6.1.2: keep dashboard sections from resurrecting deleted rows
     return jsonify({"ok": True, "deleted": deleted, "failed": failed})
 
 
@@ -1596,6 +1634,7 @@ def api_delete_vless_key(server_id):
         return jsonify({"ok": False, "error": str(exc)[:300]}), 502
     note_key_deleted(server_id, name)
     HEALTH_CACHE.pop(server_id, None)
+    invalidate_overview()  # v6.1.2: keep dashboard sections from resurrecting this row
     return jsonify({"ok": True, "name": name, "gone": True})
 
 
