@@ -23,11 +23,17 @@
 </div>
 <div id="server-list"><div class="spin">Loading servers…</div></div>
 
-{# v6.1.1: the three key sections (EXPIRING IN 3 DAYS / LOW GB /
-   EXPIRED KEYS) no longer live at the dashboard bottom. They are
-   rendered by app.js INSIDE each owner group — below the SG/JP/TH
-   country groups in MY SERVERS, and below the SERVERS heading's
-   country groups in each channel — scoped to that owner's servers. #}
+{# v6.1.1: the three per-owner key sections (EXPIRING IN 3 DAYS /
+   LOW GB / EXPIRED KEYS) no longer live at the dashboard bottom.
+   They are rendered by app.js INSIDE each owner group — below the
+   SG/JP/TH country groups in MY SERVERS, and below the SERVERS
+   heading's country groups in each channel — scoped to that owner's
+   servers.
+   v6.1.2: the TOTAL sections (same three lists aggregated across ALL
+   visible servers) DO live at the dashboard bottom, below the MY
+   SERVERS / OTHER groups — admin only, rendered by app.js
+   totalSectionsHtml(). Reseller dashboards never get them: their
+   own three sections already ARE their totals. #}
 
 {% endblock %}
 {% block scripts %}
