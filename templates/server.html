@@ -53,13 +53,8 @@
 <div class="muted small" id="page-info" style="margin:6px 2px 10px"></div>
 <button class="btn ghost block" id="load-more" style="display:none" onclick="loadMoreClients()">Load more ▼</button>
 
-{# v6: VLESS keys (3X-UI only, when the server has a VLESS inbound) —
-   a separate section, never mixed with the Outline keys above. #}
-<div id="vless-section" style="display:none">
-  <h2 class="sec sec-vless" style="margin-top:22px">VLESS keys</h2>
-  <div id="vless-list"><div class="spin">Loading…</div></div>
-  <div class="muted small" id="vless-info" style="margin:6px 2px 10px"></div>
-</div>
+{# v6.1.5: no separate VLESS section — the key list is MERGED, one
+   row per customer (a dual customer shows Copy link + Copy WS/XHTTP). #}
 
 <div class="modal-back" id="add-modal">
   <div class="modal">
@@ -148,10 +143,12 @@
 <script>
 const SERVER_ID = {{ server.id }};
 let ALL_CLIENTS = [];
-let ALL_VLESS = []; // v6: VLESS keys (3X-UI only), separate from Outline
+// v6.1.5: no ALL_VLESS any more — the list is MERGED (one row per
+// customer); HAS_VLESS only decides whether the Add Key / Bulk
+// Create modals offer the Outline/VLESS switch.
 let HAS_VLESS = false;
 loadServerPage();
-document.getElementById('client-filter').addEventListener('input', () => { SHOWN = PAGE_SIZE; renderClients(); renderVlessClients(); });
+document.getElementById('client-filter').addEventListener('input', () => { SHOWN = PAGE_SIZE; renderClients(); });
 document.querySelectorAll('#sort-chips .chip-btn').forEach(b => b.addEventListener('click', () => {
   document.querySelectorAll('#sort-chips .chip-btn').forEach(x => x.classList.remove('sel'));
   b.classList.add('sel');
