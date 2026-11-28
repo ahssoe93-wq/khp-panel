@@ -2,8 +2,17 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>{% block title %}KHP Panel{% endblock %}</title>
+{# v6.1.11: PWA — installable as an app (Home screen icon, standalone
+   full-screen, no browser address bar). Zoom is NOT disabled: the
+   layout is fixed instead (see style.css v6.1.11). #}
+<link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
+<meta name="theme-color" content="#040b1a">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='icon-192.png') }}">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="KHP Panel">
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body data-role="{{ session.get('role') or '' }}" data-user="{{ session.get('username') or '' }}">
@@ -36,10 +45,16 @@
    Resellers still reach everything they need from the dashboard
    itself (their servers + the Find a key box). #}
 {% if session.get('logged_in') and session.get('role') == 'admin' %}
+{# v6.1.11: the three tabs sit in a centered inner container at the
+   same max-width as the page content, so the bar is identical at
+   360px, 430px and desktop — never wider than the screen, never
+   cut off (the v6.1.10 bug: Settings ran off the right edge). #}
 <nav class="bottom">
+  <div class="nav-inner">
   <a href="{{ url_for('dashboard') }}" data-tab="servers" onclick="return navTab(this, event)" class="nav-servers {{ 'on' if nav=='servers' else '' }}">Servers</a>
   <a href="{{ url_for('dashboard') }}#search" data-tab="search" onclick="return navTab(this, event)" class="nav-search {{ 'on' if nav=='search' else '' }}">Search</a>
   <a href="{{ url_for('settings') }}" data-tab="settings" onclick="return navTab(this, event)" class="nav-settings {{ 'on' if nav=='settings' else '' }}">Settings</a>
+  </div>
 </nav>
 {% endif %}
 <div id="toast"></div>
