@@ -7,6 +7,7 @@
   --border: #233047;
   --emerald: #00ff81;
   --emerald-dk: #00c868;
+  --cyan: #00e5ff; /* v6.1.8: usage-bar fill (neon cyan, user-picked) */
   --text: #f1f5f9;
   --muted: #94a3b8;
   --gold: #f59e0b;
@@ -105,7 +106,7 @@ main { max-width: 720px; margin: 0 auto; padding: 16px 16px 110px; }
   flex: 1 1 100%; height: 6px;
   background: var(--surface2); border-radius: 3px; overflow: hidden;
 }
-.serverbar > i { display: block; height: 100%; background: var(--emerald); border-radius: 3px; }
+.serverbar > i { display: block; height: 100%; background: var(--cyan); border-radius: 3px; }
 .flag {
   width: 46px; height: 46px; flex: none;
   background: var(--surface2);
@@ -127,11 +128,19 @@ main { max-width: 720px; margin: 0 auto; padding: 16px 16px 110px; }
   vertical-align: middle; margin-left: 6px;
 }
 .bar { height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; margin-top: 6px; }
-.bar > i { display: block; height: 100%; background: var(--emerald); border-radius: 3px; }
+.bar > i { display: block; height: 100%; background: var(--cyan); border-radius: 3px; }
+
+/* v6.1.8: server-row sub-line never breaks inside a word ("3X-UI"
+   must not split into "3X-" / "UI"); the GB number never wraps or
+   overlaps the meta text (the row wraps whole items instead). */
+.server .grow .muted { word-break: keep-all; }
 
 /* client rows */
 .client { padding: 14px; }
-.client .name { font-weight: 700; font-size: 17px; word-break: break-all; }
+/* v6.1.8: key name in gold (#fbbf24 = var(--amber), user-picked) so it
+   stands out from the white action-button text below it. Color only —
+   size/weight/wrapping unchanged. */
+.client .name { font-weight: 700; font-size: 17px; word-break: break-all; color: var(--amber); }
 .status { font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 12px; }
 .status.active { background: rgba(0,255,129,.15); color: var(--emerald); }
 .status.expired { background: rgba(239,68,68,.15); color: var(--red); }
@@ -316,7 +325,7 @@ nav.bottom a.on { color: var(--emerald); font-weight: 700; }
   border: none; border-radius: 20px;
   padding: 8px 14px; font-size: 14px; font-weight: 700;
 }
-.server .used { text-align: right; flex: none; }
+.server .used { text-align: right; flex: none; white-space: nowrap; }
 .see-all {
   display: block; width: 100%;
   background: transparent; color: var(--emerald);
