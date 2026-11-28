@@ -696,3 +696,52 @@ body[data-role="reseller"] #toast { bottom: 24px; }
   font-size: 20px; font-weight: 800; line-height: 1; margin-left: 8px;
 }
 .group-h .group-add:hover { background: rgba(56, 189, 248, .12); }
+
+/* ---- v6.1.11 ---- */
+/* Fixed layout, 3X-UI style (user's complaint, 2026-11-28): on his
+   phone the bottom nav's Settings button ran off the right edge, the
+   Singapore group meta stacked vertically ("6 / servers / 444 keys /
+   • all / online"), and the layout differed between phones/browsers/
+   zoom. Zoom is NOT disabled — the layout is fixed instead. */
+
+/* Nothing on the page may widen the layout viewport past the screen:
+   one overflowing element used to stretch the page, which pushed the
+   fixed nav's right end off-screen. overflow: clip (not hidden) so
+   the sticky header keeps working — clip creates no scroll container. */
+html, body { overflow-x: hidden; overflow-x: clip; }
+
+/* Bottom nav: the three tabs sit in a centered inner container at the
+   same 720px max-width as the page content, so the bar is identical
+   at 360px, 430px and desktop. Each tab flexes equally, min-width: 0
+   so it can shrink below its content, nowrap + ellipsis so a label
+   can never push its neighbour off the screen. Safe-area padding so
+   the pills clear the Android gesture bar / iPhone home indicator,
+   and the page content is padded by the same amount. */
+nav.bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
+nav.bottom .nav-inner {
+  display: flex; width: 100%; max-width: 720px; margin: 0 auto;
+}
+nav.bottom a {
+  flex: 1 1 0; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+main { padding-bottom: calc(110px + env(safe-area-inset-bottom, 0px)); }
+
+/* Country-group (and reseller channel) headers: the meta gets its own
+   dedicated line — the name row keeps flag + name + dot + "+" +
+   chevron, and the meta wraps to line 2 at full width. order: 5 puts
+   it after the "+" and chevron in layout flow, so they stay on the
+   name row. One line, never stacked: nowrap + ellipsis, and the
+   string is short enough to fit 360px whole ("6 servers • 444 keys •
+   all online" is ~240px at 14px). Owner headers (MY SERVERS / OTHER)
+   keep their two-line meta: their short fixed names leave it room. */
+.group-h.country, .person-h { flex-wrap: wrap; row-gap: 8px; }
+.group-h.country .meta, .person-h .meta {
+  flex: 1 1 100%; order: 5; min-width: 0;
+  margin-left: 0; text-align: left;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.group-h.country .meta .n, .person-h .meta .n,
+.group-h.country .meta .s, .person-h .meta .s {
+  display: inline; font-size: 14px; font-weight: 700; color: var(--emerald);
+}
