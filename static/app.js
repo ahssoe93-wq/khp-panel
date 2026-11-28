@@ -299,15 +299,18 @@ function serverRowHtml(s) {
     const seen = h.last_seen ? 'last seen ' + fmtTime(h.last_seen) : 'never seen';
     return '<div class="server down">' +
       '<div class="flag">' + flagFor(s.country) + '</div>' +
-      '<div class="grow"><b style="font-size:18px">' + esc(s.name) +
+      '<div class="grow"><b style="font-size:15px">' + esc(s.name) +
       '<span class="badge-down">DOWN</span></b>' +
-      '<div class="muted small">' + (s.type === 'xui' ? '3X-UI' : 'Marzban') + ' • ' + h.clients + ' clients</div></div>' +
+      '<div class="muted small">' + '<span style="white-space:nowrap">' + (s.type === 'xui' ? '3X-UI' : 'Marzban') + '</span>' + ' • ' + h.clients + ' clients</div></div>' +
       '<div class="used"><span class="dot off"></span><div class="muted small" style="color:var(--red)">' + seen + '</div></div>' +
       '<button class="keybtn" style="background:transparent;color:var(--red);border:1px solid var(--red)" onclick="event.stopPropagation();retryServer(' + s.id + ', this)">Retry</button></div>';
   }
+  // v6.1.8: the panel-type token ("3X-UI") must never split mid-word
+  // ("3X-" / "UI") — it sits in a nowrap span; the sub-line CSS also
+  // sets word-break: keep-all as a second guard.
   const sub = online === null
     ? (s.country + ' • checking…')
-    : (s.type === 'xui' ? '3X-UI' : 'Marzban') + ' • ' + h.clients + ' clients' + expHtml;
+    : '<span style="white-space:nowrap">' + (s.type === 'xui' ? '3X-UI' : 'Marzban') + '</span>' + ' • ' + h.clients + ' clients' + expHtml;
   // usage bar (v3): real numbers — used vs sum of clients' GB limits
   const pct = (h && h.online && h.limit) ? Math.min(100, Math.round(h.used * 100 / h.limit)) : 0;
   const bar = (h && h.online && h.limit)
@@ -324,7 +327,7 @@ function serverRowHtml(s) {
     : '';
   return '<div class="server" onclick="location.href=\'/server/' + s.id + '\'">' +
     '<div class="flag">' + flagFor(s.country) + '</div>' +
-    '<div class="grow"><b style="font-size:18px">' + esc(s.name) + badges + '</b>' +
+    '<div class="grow"><b style="font-size:15px">' + esc(s.name) + badges + '</b>' +
     '<div class="muted small">' + sub + '</div></div>' +
     '<div class="used"><span class="dot ' + dot + '"></span>' +
     (h && h.online ? '<div class="muted small">' + fmtGB(h.used) + '</div>' : '') + '</div>' +
