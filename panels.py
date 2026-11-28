@@ -350,12 +350,19 @@ class XuiClient:
         has NO Outline inbound at all.)
         Returns {"outline": {"id", "port"} | None,
                  "vless": [{"id", "port", "network", "security", "host",
-                            "path", "server_name", "mode", "fingerprint"}]}.
+                            "path", "server_name", "mode", "fingerprint",
+                            "address"}]}.
         Outline = the first shadowsocks inbound. VLESS = every vless
         inbound (WS on 443 + XHTTP on 2087 in the studied panels).
-        v6.1.7: a vless inbound whose shareAddrStrategy is "custom" with
-        a non-empty shareAddr reports that address as BOTH host and
-        server_name — the address 3X-UI itself puts in its share links."""
+        "host" = the WS/XHTTP Host header, "server_name" = the TLS SNI
+        (both from streamSettings, never rewritten). "address" = the
+        connection address for the link's @host part: the inbound's
+        Custom share address when shareAddrStrategy is "custom" with a
+        non-empty shareAddr, else the streamSettings host.
+        v6.1.8 (corrects v6.1.7, which wrongly put the share address in
+        host AND server_name — SNI/host must stay the panel domain or
+        the link cannot connect): only "address" ever carries the
+        share address."""
         inbounds = self.list_inbounds_raw(refresh=refresh)
         outline = None
         vless = []
@@ -380,25 +387,31 @@ class XuiClient:
                     host = xh.get("host") or server_name
                     path = xh.get("path") or ""
                     mode = xh.get("mode") or "auto"
-                # v6.1.7: a VLESS inbound with a Custom share address
-                # (3X-UI "Share address strategy" = Custom) exports its
-                # links under that address — mirror it here, so the panel
-                # builds the same links 3X-UI itself would. Applies to
-                # ANY server with a custom share address (today only
-                # MK-T157-186: myproxy.giize.com). Any other strategy, or
-                # an empty address, leaves the streamSettings host alone.
+                # v6.1.8 (corrects v6.1.7): a VLESS inbound with a
+                # Custom share address (3X-UI "Share address strategy"
+                # = Custom) uses that address ONLY as the connection
+                # address (@host in the link). host (WS/XHTTP Host
+                # header) and server_name (TLS SNI) STAY the
+                # streamSettings values — the TLS cert is for the panel
+                # domain, so putting the share address in sni=/&host=
+                # breaks the connection (verified live: MK-T157-186
+                # links with sni=myproxy.giize.com failed to connect).
+                # Applies to ANY server with a custom share address
+                # (today only MK-T157-186: myproxy.giize.com). Any
+                # other strategy, or an empty address, leaves the
+                # address = the streamSettings host.
                 share_strategy = str(
                     inb.get("shareAddrStrategy") or "").strip().lower()
                 share_addr = str(inb.get("shareAddr") or "").strip()
-                if share_strategy == "custom" and share_addr:
-                    host = share_addr
-                    server_name = share_addr
+                address = (share_addr
+                           if share_strategy == "custom" and share_addr
+                           else host)
                 vless.append({
                     "id": inb.get("id"), "port": inb.get("port"),
                     "network": network, "security": security,
                     "host": host, "path": path,
                     "server_name": server_name, "mode": mode,
-                    "fingerprint": fingerprint,
+                    "fingerprint": fingerprint, "address": address,
                 })
         return {"outline": outline, "vless": vless}
 
@@ -931,10 +944,10 @@ class XuiClient:
     def build_vless_links(self, client):
         """WS link (primary, port 443) + XHTTP link (secondary, port 2087)
         from the vless inbounds' streamSettings. HOST/SERVERNAME = the
-        panel domain (per the study) — unless an inbound has a Custom
-        share address (v6.1.7: detect_inbounds() then reports that
-        address as host + server_name, so the links use it as @host,
-        sni= and &host=). Returns {"ws", "xhttp", "primary"}.
+        panel domain (per the study) — a Custom share address (v6.1.8)
+        changes ONLY the @host connection address; sni= stays the
+        server_name and &host= stays the host, both the panel domain.
+        Returns {"ws", "xhttp", "primary"}.
         Other networks get a best-effort generic link under their network
         name."""
         vl = self.detect_inbounds()["vless"]
@@ -949,6 +962,9 @@ class XuiClient:
             net = (v.get("network") or "").lower()
             host = v.get("host") or v.get("server_name") or ""
             sni = v.get("server_name") or host
+            # v6.1.8: the @host connection address only — the share
+            # address when the inbound has a Custom one, else the host.
+            address = v.get("address") or host
             path = urllib.parse.quote(v.get("path") or "", safe="/")
             port = v.get("port") or 443
             fp = v.get("fingerprint") or "chrome"
@@ -957,19 +973,19 @@ class XuiClient:
                 out["ws"] = (
                     "vless://%s@%s:%d?encryption=none&security=%s&sni=%s"
                     "&type=ws&host=%s&path=%s&fp=%s#%s"
-                    % (uid, host, port, sec, sni, host, path, fp, name))
+                    % (uid, address, port, sec, sni, host, path, fp, name))
             elif net == "xhttp":
                 mode = v.get("mode") or "auto"
                 out["xhttp"] = (
                     "vless://%s@%s:%d?encryption=none&security=%s&sni=%s"
                     "&type=xhttp&mode=%s&host=%s&path=%s&fp=%s#%s"
-                    % (uid, host, port, sec, sni, mode, host, path, fp,
+                    % (uid, address, port, sec, sni, mode, host, path, fp,
                        name))
             else:
                 out[net] = (
                     "vless://%s@%s:%d?encryption=none&security=%s&sni=%s"
                     "&type=%s&host=%s&fp=%s#%s"
-                    % (uid, host, port, sec, sni, net, host, fp, name))
+                    % (uid, address, port, sec, sni, net, host, fp, name))
         out["primary"] = out.get("ws") or out.get("xhttp") or next(
             (l for k, l in out.items() if k != "primary" and l), None)
         return out
