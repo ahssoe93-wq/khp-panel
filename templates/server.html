@@ -71,10 +71,13 @@
         </div>
       </div>
       <label>Months</label>
+      <!-- v6.1.6: preset buttons are re-rendered from /api/presets
+           (the logged-in user's own tiers, with prices) — the three
+           buttons below are only the pre-JS fallback. -->
       <div class="seg" id="add-months">
-        <button type="button" data-m="1" class="sel">1 mo • 400 GB</button>
-        <button type="button" data-m="2">2 mo • 1000 GB</button>
-        <button type="button" data-m="3">3 mo • 1500 GB</button>
+        <button type="button" data-m="1" data-gb="400" class="sel">1M • 400 GB • 4,000 Ks</button>
+        <button type="button" data-m="2" data-gb="1000">2M • 1000 GB • 7,000 Ks</button>
+        <button type="button" data-m="3" data-gb="1500">3M • 1500 GB • 10,000 Ks</button>
       </div>
       <label>Custom GB</label>
       <input id="add-gb" type="number" min="1" step="1" placeholder="e.g. 750 — overrides the preset above">
@@ -120,10 +123,11 @@
         </div>
       </div>
       <label>Months</label>
+      <!-- v6.1.6: same per-user presets as Add Key (see above). -->
       <div class="seg" id="bulk-months">
-        <button type="button" data-m="1" class="sel">1 mo • 400 GB</button>
-        <button type="button" data-m="2">2 mo • 1000 GB</button>
-        <button type="button" data-m="3">3 mo • 1500 GB</button>
+        <button type="button" data-m="1" data-gb="400" class="sel">1M • 400 GB • 4,000 Ks</button>
+        <button type="button" data-m="2" data-gb="1000">2M • 1000 GB • 7,000 Ks</button>
+        <button type="button" data-m="3" data-gb="1500">3M • 1500 GB • 10,000 Ks</button>
       </div>
       <label>Custom GB</label>
       <input id="bulk-gb" type="number" min="1" step="1" placeholder="e.g. 750 — overrides the preset above">
@@ -170,6 +174,8 @@ document.querySelectorAll('#add-months button').forEach(b => b.addEventListener(
 document.querySelectorAll('#add-proto button').forEach(b => b.addEventListener('click', () => {
   document.querySelectorAll('#add-proto button').forEach(x => x.classList.remove('sel'));
   b.classList.add('sel');
+  // v6.1.6: the month buttons show the chosen protocol's presets.
+  renderPresetButtons('add-months', b.dataset.p);
 }));
 document.querySelectorAll('#bulk-months button').forEach(b => b.addEventListener('click', () => {
   document.querySelectorAll('#bulk-months button').forEach(x => x.classList.remove('sel'));
@@ -178,6 +184,8 @@ document.querySelectorAll('#bulk-months button').forEach(b => b.addEventListener
 document.querySelectorAll('#bulk-proto button').forEach(b => b.addEventListener('click', () => {
   document.querySelectorAll('#bulk-proto button').forEach(x => x.classList.remove('sel'));
   b.classList.add('sel');
+  // v6.1.6: the month buttons show the chosen protocol's presets.
+  renderPresetButtons('bulk-months', b.dataset.p);
 }));
 if (location.hash === '#add') openAddKey();
 </script>
