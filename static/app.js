@@ -788,7 +788,8 @@ function renSelBarHtml(owner, list) {
     '<label class="sel-all"><input type="checkbox"' + (allChecked ? ' checked' : '') +
     ' onchange="toggleRenSelAll(\'' + esc(owner) + '\', this.checked)"> <span>Select all (' + list.length + ')</span></label>' +
     '<select class="ren-month" aria-label="Months to renew">' +
-    '<option value="1">+1 mo</option><option value="2">+2 mo</option><option value="3">+3 mo</option></select>' +
+    '<option value="1">+1M</option><option value="2">+2M</option><option value="3">+3M</option>' +
+    '<option value="4">+4M</option><option value="5">+5M</option><option value="6">+6M</option></select>' +
     '<button class="btn sm" style="display:' + (n ? '' : 'none') + '" onclick="renewExpiringSelected(\'' + esc(owner) + '\', this)">Renew selected (' + n + ')</button></div>';
 }
 function toggleRenSel(cb) {
@@ -845,7 +846,7 @@ async function renewExpiringSelected(owner, btn) {
   // two-click confirm showing the count AND the months — never renew
   // without it (same pattern as the server-page bulk delete).
   armOrRun('exp-ren:' + owner + ':' + items.length + ':' + months, btn,
-    'Renew ' + items.length + ' keys +' + months + ' mo?', async () => {
+    'Renew ' + items.length + ' keys +' + months + 'M?', async () => {
     let renewed = 0; const failed = [];
     for (const serverId of Object.keys(byServer)) {
       try {
@@ -869,7 +870,7 @@ async function renewExpiringSelected(owner, btn) {
     // one re-render for the whole batch (applyKeyPatch was deferred)
     renderServers();
     updateRenSelBars();
-    toast('Renewed ' + renewed + ' keys +' + months + ' mo' + (failed.length ? ' • ' + failed.length + ' failed' : ''));
+    toast('Renewed ' + renewed + ' keys +' + months + 'M' + (failed.length ? ' • ' + failed.length + ' failed' : ''));
   });
 }
 /* v6.1.3: key-sharing flag. SHARED_MAP is "serverId|proto|name" ->
@@ -1145,7 +1146,49 @@ function applyKeyPatch(serverId, oldName, patch, skipRender) {
     if (!skipRender) renderServers();
   }
 }
+/* v6.1.6: per-user presets — the logged-in user's own tiers
+   (months + GB + price), per protocol. The Add Key / Bulk Create
+   month buttons are rendered from here; the static buttons in
+   server.html are only the pre-JS fallback. */
+let MY_PRESETS = null;
+async function loadMyPresets() {
+  try {
+    const j = await api('/api/presets');
+    MY_PRESETS = j.presets;
+  } catch (e) { MY_PRESETS = null; }
+  renderPresetButtons('add-months', currentAddProto());
+  renderPresetButtons('bulk-months', currentBulkProto());
+}
+function fmtKs(n) { return Number(n).toLocaleString('en-US') + ' Ks'; }
+function renderPresetButtons(id, protocol) {
+  const el = document.getElementById(id);
+  if (!el || !MY_PRESETS) return;
+  const tiers = MY_PRESETS[protocol] || [];
+  if (!tiers.length) return;
+  el.innerHTML = tiers.map(t =>
+    '<button type="button" data-m="' + t.months + '" data-gb="' + t.gb + '">' +
+    t.months + 'M • ' + t.gb + ' GB • ' + fmtKs(t.price) + '</button>').join('');
+  el.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+    el.querySelectorAll('button').forEach(x => x.classList.remove('sel'));
+    b.classList.add('sel');
+  }));
+  el.querySelector('button').classList.add('sel');
+}
+function currentAddProto() {
+  const b = document.querySelector('#add-proto .sel');
+  return b ? b.dataset.p : 'outline';
+}
+function currentBulkProto() {
+  const b = document.querySelector('#bulk-proto .sel');
+  return b ? b.dataset.p : 'outline';
+}
+function selectedTier(containerId) {
+  const b = document.querySelector('#' + containerId + ' button.sel');
+  return b ? {months: parseInt(b.dataset.m, 10),
+              gb: parseFloat(b.dataset.gb)} : null;
+}
 async function loadServerPage() {
+  loadMyPresets();
   // v4.2: health and keys load IN PARALLEL — the old code awaited
   // /api/health first, so the key list waited behind the slowest of 12
   // panel checks (and behind a queued gunicorn worker). Keys render as
@@ -1249,6 +1292,7 @@ async function deleteSelected() {
 /* v6.1: bulk create modal. */
 let BULK_LAST_LINKS = [];
 function openBulkCreate() {
+  renderPresetButtons('bulk-months', currentBulkProto());
   document.getElementById('bulk-form').style.display = '';
   document.getElementById('bulk-result').style.display = 'none';
   document.getElementById('bulk-result').innerHTML = '';
@@ -1266,7 +1310,8 @@ async function submitBulkCreate() {
   const count = parseInt(document.getElementById('bulk-count').value, 10);
   const gbRaw = (document.getElementById('bulk-gb').value || '').trim();
   const dateRaw = (document.getElementById('bulk-date').value || '').trim();
-  const months = parseInt(document.querySelector('#bulk-months button.sel').dataset.m, 10);
+  const bulkTier = selectedTier('bulk-months');
+  const months = bulkTier ? bulkTier.months : 1;
   const protoBtn = document.querySelector('#bulk-proto .sel');
   const proto = protoBtn ? protoBtn.dataset.p : 'outline';
   const btn = document.getElementById('bulk-submit');
@@ -1284,6 +1329,7 @@ async function submitBulkCreate() {
   }
   const body = {base_name: base, count, months, protocol: proto};
   if (gbRaw !== '') body.gb = parseFloat(gbRaw);
+  else if (bulkTier) body.gb = bulkTier.gb; // v6.1.6: preset tier GB
   if (dateRaw !== '') body.expiry_date = dateRaw;
   btn.disabled = true; btn.textContent = 'Creating…';
   try {
@@ -1576,9 +1622,9 @@ function openRenewModal(serverId, name, proto) {
     'The key is renamed to the new date. GB stays the same.</p>' +
     '<div style="height:12px"></div>' +
     '<div class="seg">' +
-    '<button type="button" onclick="submitRenew(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', 1, this, \'' + (proto || 'outline') + '\')">+1 mo</button>' +
-    '<button type="button" onclick="submitRenew(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', 2, this, \'' + (proto || 'outline') + '\')">+2 mo</button>' +
-    '<button type="button" onclick="submitRenew(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', 3, this, \'' + (proto || 'outline') + '\')">+3 mo</button>' +
+    '<button type="button" onclick="submitRenew(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', 1, this, \'' + (proto || 'outline') + '\')">+1M</button>' +
+    '<button type="button" onclick="submitRenew(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', 2, this, \'' + (proto || 'outline') + '\')">+2M</button>' +
+    '<button type="button" onclick="submitRenew(' + serverId + ', \'' + esc(name).replace(/'/g, "\\'") + '\', 3, this, \'' + (proto || 'outline') + '\')">+3M</button>' +
     '</div><div style="height:10px"></div>' +
     '<button class="btn ghost block" onclick="closeActionModal()">Cancel</button>');
 }
@@ -1594,12 +1640,12 @@ async function submitRenew(serverId, name, months, btn, proto) {
        body: JSON.stringify({months})});
     if (proto === 'vless') {
       showActionResult(j.name, j.links.ws || j.link,
-        'renewed +' + months + ' mo • ' + j.gb + ' GB • exp ' + j.expiry_h, j.links.xhttp);
+        'renewed +' + months + 'M • ' + j.gb + ' GB • exp ' + j.expiry_h, j.links.xhttp);
     } else {
       // v6.1.5: a dual customer also renewed its VLESS side — show
       // its XHTTP link as the second link.
       showActionResult(j.name, j.link,
-        'renewed +' + months + ' mo • ' + j.gb + ' GB • exp ' + j.expiry_h,
+        'renewed +' + months + 'M • ' + j.gb + ' GB • exp ' + j.expiry_h,
         j.links ? j.links.xhttp : undefined);
     }
     toast('Renewed → ' + j.name);
@@ -1682,6 +1728,7 @@ async function submitEdit(serverId, name, btn, proto) {
   btn.disabled = false; btn.textContent = 'Save changes';
 }
 function openAddKey() {
+  renderPresetButtons('add-months', currentAddProto());
   document.getElementById('add-form').style.display = '';
   document.getElementById('add-result').style.display = 'none';
   const xw = document.getElementById('add-result-xhttp-wrap');
@@ -1695,7 +1742,8 @@ function closeAddKey() {
 async function submitAddKey() {
   clearQuietSync();
   const name = document.getElementById('add-name').value.trim();
-  const months = parseInt(document.querySelector('#add-months button.sel').dataset.m, 10);
+  const tier = selectedTier('add-months');
+  const months = tier ? tier.months : 1;
   const btn = document.getElementById('add-submit');
   if (!name) { toast('Enter a customer name'); return; }
   // v4: optional custom GB / custom expiry date override the preset.
@@ -1706,6 +1754,10 @@ async function submitAddKey() {
     const gb = parseFloat(gbRaw);
     if (isNaN(gb) || gb <= 0) { toast('Custom GB must be a positive number'); return; }
     body.gb = gb;
+  } else if (tier) {
+    // v6.1.6: the picked preset tier's GB — the server matches it
+    // back to the tier (so MK's three 1M VLESS tiers stay distinct).
+    body.gb = tier.gb;
   }
   if (dateRaw !== '') {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dateRaw)) { toast('Pick a valid date'); return; }
@@ -2106,7 +2158,9 @@ function usersListHtml(users) {
       (isAdmin ? 'ADMIN' : 'RESELLER') + '</span>' +
       '<div class="muted small">' + esc(u.display_name || '') +
       (u.created_at ? ' • since ' + esc(u.created_at) : '') + '</div></div></div>' +
-      (isAdmin ? '<div class="muted small" style="margin-top:8px">The Super Admin can never be deleted.</div>'
+      (isAdmin ? '<div class="muted small" style="margin-top:8px">The Super Admin can never be deleted.</div>' +
+        '<div style="margin-top:10px"><button class="btn ghost" onclick="togglePresetsEditor(\'' + n + '\', this)">Presets</button></div>' +
+        '<div id="presets-ed-' + esc(u.username) + '"></div>'
         : '<div style="margin-top:10px">' +
           '<label>Display name (channel name)</label>' +
           '<input id="u-disp-' + esc(u.username) + '" value="' + esc(u.display_name || '') + '">' +
@@ -2114,8 +2168,10 @@ function usersListHtml(users) {
           '<input id="u-pw-' + esc(u.username) + '" type="password" placeholder="At least 6 characters" autocomplete="new-password">' +
           '<div class="row" style="margin-top:10px">' +
           '<button class="btn ghost" onclick="saveUser(\'' + n + '\', this)">Save</button>' +
+          '<button class="btn ghost" onclick="togglePresetsEditor(\'' + n + '\', this)">Presets</button>' +
           '<button class="btn ghost" style="color:var(--red);border-color:rgba(239,68,68,.5)" onclick="deleteUser(\'' + n + '\', this)">Delete</button>' +
-          '</div></div>') +
+          '</div></div>' +
+          '<div id="presets-ed-' + esc(u.username) + '"></div>') +
       '</div>';
   }).join('');
 }
@@ -2132,6 +2188,69 @@ function populateOwnerDropdown(users) {
   sel.innerHTML = opts;
   sel.value = cur;
   if (sel.value !== cur) sel.value = 'admin';
+}
+/* v6.1.6: per-user preset editor (Settings → Users, Super Admin
+   only). Each user has Outline + VLESS tiers; the admin edits GB and
+   price per tier, adds/removes tiers, any months 1–12. Saved via
+   PUT /api/users/<username>/presets — applies at once, no rebuild. */
+function presetRowHtml(t) {
+  return '<div class="preset-row">' +
+    '<input type="number" class="pm" min="1" max="12" value="' + t.months + '" title="Months">' +
+    '<span class="muted small">M</span>' +
+    '<input type="number" class="pg" min="1" value="' + t.gb + '" title="GB">' +
+    '<span class="muted small">GB</span>' +
+    '<input type="number" class="pp" min="0" value="' + t.price + '" title="Price (Ks)">' +
+    '<span class="muted small">Ks</span>' +
+    '<button type="button" class="btn ghost sm" onclick="this.parentElement.remove()">✕</button></div>';
+}
+function presetEditorHtml(username, presets) {
+  const n = esc(username).replace(/'/g, "\\'");
+  const sec = proto => {
+    const rows = (presets[proto] || []).map(presetRowHtml).join('');
+    return '<label style="margin-top:10px">' + (proto === 'outline' ? 'Outline' : 'VLESS') + ' presets</label>' +
+      '<div class="preset-rows" data-proto="' + proto + '">' + rows + '</div>' +
+      '<button type="button" class="btn ghost sm" onclick="addPresetRow(\'' + n + '\', \'' + proto + '\')">+ Add tier</button>';
+  };
+  return '<div class="preset-ed">' + sec('outline') + sec('vless') +
+    '<div class="row" style="margin-top:12px">' +
+    '<button class="btn" onclick="savePresets(\'' + n + '\', this)">Save presets</button></div>' +
+    '<p class="muted small">Each user sees only their own tiers. Months 1–12, 1–6 tiers per type. Changes apply at once — no reinstall needed.</p></div>';
+}
+async function togglePresetsEditor(username, btn) {
+  const wrap = document.getElementById('presets-ed-' + username);
+  if (!wrap) return;
+  if (wrap.innerHTML) { wrap.innerHTML = ''; btn.textContent = 'Presets'; return; }
+  btn.textContent = '…';
+  try {
+    const j = await api('/api/users/' + encodeURIComponent(username) + '/presets');
+    wrap.innerHTML = presetEditorHtml(username, j.presets);
+    btn.textContent = 'Hide presets';
+  } catch (e) { toast('Could not load presets: ' + e.message); btn.textContent = 'Presets'; }
+}
+function addPresetRow(username, proto) {
+  const wrap = document.getElementById('presets-ed-' + username);
+  if (!wrap) return;
+  const box = wrap.querySelector('.preset-rows[data-proto="' + proto + '"]');
+  if (!box) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = presetRowHtml({months: 1, gb: 400, price: 4000});
+  box.appendChild(tmp.firstElementChild);
+}
+async function savePresets(username, btn) {
+  const wrap = document.getElementById('presets-ed-' + username);
+  if (!wrap) return;
+  const collect = proto => [...wrap.querySelectorAll('.preset-rows[data-proto="' + proto + '"] .preset-row')].map(r => ({
+    months: parseInt(r.querySelector('.pm').value, 10),
+    gb: parseInt(r.querySelector('.pg').value, 10),
+    price: parseInt(r.querySelector('.pp').value, 10)}));
+  btn.disabled = true;
+  try {
+    await api('/api/users/' + encodeURIComponent(username) + '/presets', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({outline: collect('outline'), vless: collect('vless')})});
+    toast('Presets saved for ' + username);
+  } catch (e) { toast('Save failed: ' + e.message); }
+  btn.disabled = false;
 }
 async function loadUsers() {
   try {
