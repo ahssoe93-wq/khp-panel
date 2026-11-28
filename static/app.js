@@ -311,7 +311,8 @@ function serverRowHtml(s) {
     '<div class="muted small">' + sub + '</div></div>' +
     '<div class="used"><span class="dot ' + dot + '"></span>' +
     (h && h.online ? '<div class="muted small">' + fmtGB(h.used) + '</div>' : '') + '</div>' +
-    '<button class="keybtn" onclick="event.stopPropagation();location.href=\'/server/' + s.id + '#add\'">+ Key</button>' + bar + '</div>';
+    '<button class="keybtn" onclick="event.stopPropagation();location.href=\'/server/' + s.id + '#add\'">+ Key</button>' +
+    '<span class="chev chev-l3">›</span>' + bar + '</div>';
 }
 /* Right side of a group header: server count + total keys + whether the
    whole group is online, with a green dot. */
@@ -361,7 +362,7 @@ function renderServers() {
       '<span class="gflag">' + flagFor(g === 'Other' ? '' : g) + '</span>' +
       '<b>' + esc(countryName(g)) + '</b>' +
       groupMetaHtml(items) +
-      '<span class="chev">' + chev + '</span></div>';
+      '<span class="chev chev-l2">' + chev + '</span></div>';
     if (collapsed) return html;
     html += items.map(serverRowHtml).join('');
     return html;
@@ -423,7 +424,7 @@ function countryGroupsHtml(servers, f, keyPrefix) {
       '<span class="gflag">' + flagFor(g === 'Other' ? '' : g) + '</span>' +
       '<b>' + esc(countryName(g)) + '</b>' +
       groupMetaHtml(items) +
-      '<span class="chev">' + chev + '</span></div>';
+      '<span class="chev chev-l2">' + chev + '</span></div>';
     if (collapsed) return html;
     html += items.map(serverRowHtml).join('');
     return html;
@@ -434,7 +435,7 @@ function ownerGroupHtml(key, title, servers, f, persons) {
   const chev = collapsed ? '▼' : '▲';
   let html = '<div class="group-h" data-group="' + esc(key) + '" onclick="toggleGroup(\'' + esc(key) + '\')">' +
     '<b>' + esc(title) + '</b>' + groupMetaHtml(servers) +
-    '<span class="chev">' + chev + '</span></div>';
+    '<span class="chev chev-l1">' + chev + '</span></div>';
   if (collapsed) return html;
   if (persons) {
     html += persons.map(p => {
@@ -444,7 +445,7 @@ function ownerGroupHtml(key, title, servers, f, persons) {
       let ph = '<div class="person-h" data-group="' + esc(pkey) + '" onclick="toggleGroup(\'' + esc(pkey) + '\')">' +
         '<b>' + esc(p.servers[0].owner_display || p.owner) + '</b>' +
         groupMetaHtml(p.servers) +
-        '<span class="chev">' + pchev + '</span></div>';
+        '<span class="chev chev-l2">' + pchev + '</span></div>';
       if (pCollapsed) return ph;
       return ph + '<div class="person-body">' +
         '<div class="person-servers-h">SERVERS</div>' +
