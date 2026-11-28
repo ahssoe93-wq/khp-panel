@@ -65,7 +65,7 @@ import re as _re
 
 _NAME_DATE_RE = _re.compile(r"^(.*?)__(\d{1,2})[_-](\d{1,2})[_-](\d{4})$")
 
-RENEW_DAYS = {1: 30, 2: 60, 3: 90}
+RENEW_DAYS = {1: 30, 2: 60, 3: 90, 4: 120, 5: 150, 6: 180}
 
 
 def verify_with_retry(get_fn, expect_present=True, tries=3, delay=1):
@@ -105,7 +105,7 @@ def renew_name_and_date(name, old_date, months):
     encodes the new date in the same Name__D_M_YYYY form. GB is unchanged
     on renew — only the name and the expiry move."""
     if months not in RENEW_DAYS:
-        raise PanelError("months must be 1, 2 or 3")
+        raise PanelError("months must be 1..6")
     new_date = old_date + timedelta(days=RENEW_DAYS[months])
     base, _ = parse_name_date(name)
     new_name = "%s__%d_%d_%d" % (base, new_date.day, new_date.month,
