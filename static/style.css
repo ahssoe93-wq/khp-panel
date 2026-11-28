@@ -557,3 +557,33 @@ nav.bottom a.nav-settings { background: #a855f7; color: #fff; }
    on their pages — and the toast's 90px bottom offset would float it. */
 body[data-role="reseller"] main { padding-bottom: 24px; }
 body[data-role="reseller"] #toast { bottom: 24px; }
+
+/* ---- v6.1.3 ---- */
+/* ITEM 6 — frame colors: owner-level frames (MY SERVERS, OTHER) stay
+   neon green; COUNTRY-group frames (SG / JP / TH, admin and reseller)
+   are BLUE — the same #38BDF8 as the Search pill. Only the frame
+   changes; section colours, nav pills and everything else stay. */
+.group-h.country { border-color: #38bdf8; box-shadow: 0 0 14px rgba(56, 189, 248, 0.22); }
+/* ITEM 5 — total-online strip: full-width stat-style row under the
+   4 cards, same card look (emerald border + glow, big green number). */
+.online-strip {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--surface); border: 2px solid var(--emerald);
+  border-radius: 16px; padding: 12px 16px; margin-bottom: 20px;
+  box-shadow: 0 0 14px rgba(0, 255, 129, 0.18);
+}
+.online-strip b { font-size: 28px; color: var(--emerald); }
+.online-strip span { color: var(--muted); font-size: 14px; }
+.online-strip .dot { width: 12px; height: 12px; }
+/* ITEM 4 — key-sharing flag: amber badge on rows used from 3+ IPs
+   (2 phones is normal, so 3+ is the warning line). */
+.badge-shared {
+  background: #f59e0b; color: #0b1220;
+  font-size: 11px; font-weight: 800;
+  border-radius: 12px; padding: 2px 8px;
+  vertical-align: middle; margin-left: 8px; white-space: nowrap;
+}
+/* ITEM 1 — bulk-renew bar: the month picker sits next to the Renew
+   button. (Inputs default to width:100% in this stylesheet, so the
+   picker needs an explicit width.) */
+.ren-month { width: auto; flex: none; padding: 7px 10px; font-size: 14px; }
