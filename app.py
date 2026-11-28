@@ -35,7 +35,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from flask import (Flask, Response, abort, g, jsonify, redirect,
-                   render_template, request, session, url_for)
+                   render_template, request, send_from_directory, session,
+                   url_for)
 
 from panels import (GB_BYTES, MM, MONTHS_GB, PanelError, add_months,
                     client_status, expiry_for, fmt_gb, make_client)
@@ -541,6 +542,19 @@ def index():
     if not session.get("logged_in"):
         return redirect(url_for("login"))
     return redirect(url_for("dashboard"))
+
+
+@app.route("/sw.js")
+def service_worker():
+    # v6.1.11: PWA — the service worker must be served from the site
+    # root (not /static/) or its scope would be /static/ only and it
+    # could never control the app. No-cache so a new deploy's worker
+    # (new CACHE name) is picked up on the next load, never a stale one.
+    resp = send_from_directory(os.path.join(BASE_DIR, "static"), "sw.js",
+                               mimetype="application/javascript", max_age=0)
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["Service-Worker-Allowed"] = "/"
+    return resp
 
 
 @app.route("/setup", methods=["GET", "POST"])
