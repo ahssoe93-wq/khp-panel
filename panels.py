@@ -352,7 +352,10 @@ class XuiClient:
                  "vless": [{"id", "port", "network", "security", "host",
                             "path", "server_name", "mode", "fingerprint"}]}.
         Outline = the first shadowsocks inbound. VLESS = every vless
-        inbound (WS on 443 + XHTTP on 2087 in the studied panels)."""
+        inbound (WS on 443 + XHTTP on 2087 in the studied panels).
+        v6.1.7: a vless inbound whose shareAddrStrategy is "custom" with
+        a non-empty shareAddr reports that address as BOTH host and
+        server_name — the address 3X-UI itself puts in its share links."""
         inbounds = self.list_inbounds_raw(refresh=refresh)
         outline = None
         vless = []
@@ -377,6 +380,19 @@ class XuiClient:
                     host = xh.get("host") or server_name
                     path = xh.get("path") or ""
                     mode = xh.get("mode") or "auto"
+                # v6.1.7: a VLESS inbound with a Custom share address
+                # (3X-UI "Share address strategy" = Custom) exports its
+                # links under that address — mirror it here, so the panel
+                # builds the same links 3X-UI itself would. Applies to
+                # ANY server with a custom share address (today only
+                # MK-T157-186: myproxy.giize.com). Any other strategy, or
+                # an empty address, leaves the streamSettings host alone.
+                share_strategy = str(
+                    inb.get("shareAddrStrategy") or "").strip().lower()
+                share_addr = str(inb.get("shareAddr") or "").strip()
+                if share_strategy == "custom" and share_addr:
+                    host = share_addr
+                    server_name = share_addr
                 vless.append({
                     "id": inb.get("id"), "port": inb.get("port"),
                     "network": network, "security": security,
@@ -915,7 +931,10 @@ class XuiClient:
     def build_vless_links(self, client):
         """WS link (primary, port 443) + XHTTP link (secondary, port 2087)
         from the vless inbounds' streamSettings. HOST/SERVERNAME = the
-        panel domain (per the study). Returns {"ws", "xhttp", "primary"}.
+        panel domain (per the study) — unless an inbound has a Custom
+        share address (v6.1.7: detect_inbounds() then reports that
+        address as host + server_name, so the links use it as @host,
+        sni= and &host=). Returns {"ws", "xhttp", "primary"}.
         Other networks get a best-effort generic link under their network
         name."""
         vl = self.detect_inbounds()["vless"]
