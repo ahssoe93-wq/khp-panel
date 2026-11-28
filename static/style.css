@@ -135,6 +135,51 @@ main { max-width: 720px; margin: 0 auto; padding: 16px 16px 110px; }
    overlaps the meta text (the row wraps whole items instead). */
 .server .grow .muted { word-break: keep-all; }
 
+/* v6.1.9: narrow-phone server-row layout (max-width 560px).
+   WHY v6.1.8 failed on the real phone: 15px + keep-all + nowrap only
+   treated the symptoms. The single-line flex row's minimum width
+   (~450px: flag 46 + name + GB + online + Key + chevron + gaps)
+   exceeds a ~360px phone, so items wrapped and the vertically
+   centered .used GB landed on top of the sub-line text
+   ("Marzban,343 GB"). This restructures the row into 4 lines, so
+   every element gets its own grid cell and overlap is structurally
+   impossible. Desktop is untouched: the base flex rules above still
+   apply outside this query (the .grow only becomes display:contents
+   inside it, so on desktop name + sub stay stacked in one column
+   exactly as before). */
+@media (max-width: 560px) {
+  .server {
+    display: grid;
+    grid-template-columns: 46px minmax(0, 1fr) auto;
+    column-gap: 12px;
+    row-gap: 10px;
+    align-items: center;
+  }
+  /* L1: flag + name (one line, ellipsis if ever too long) + chevron */
+  .server .flag { grid-column: 1; grid-row: 1; }
+  .server .grow { display: contents; }
+  .server .grow > b {
+    grid-column: 2; grid-row: 1;
+    display: block; min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .server .chev.chev-l3 {
+    grid-column: 3; grid-row: 1;
+    align-self: center; justify-self: end;
+  }
+  /* L2: meta (left) + GB (right) — separate grid cells, never overlap */
+  .server .grow .muted { grid-column: 1 / 3; grid-row: 2; }
+  .server .used {
+    grid-column: 3; grid-row: 2;
+    display: flex; align-items: center; gap: 6px; justify-self: end;
+  }
+  /* L3: usage bar, full width (cyan fill unchanged) */
+  .server .serverbar { grid-column: 1 / -1; grid-row: 3; }
+  /* L4: online (left) + Key button (right) */
+  .server .srv-online { grid-column: 1 / 3; grid-row: 4; text-align: left; }
+  .server .keybtn { grid-column: 3; grid-row: 4; justify-self: end; }
+}
+
 /* client rows */
 .client { padding: 14px; }
 /* v6.1.8: key name in gold (#fbbf24 = var(--amber), user-picked) so it
