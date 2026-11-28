@@ -302,6 +302,7 @@ function serverRowHtml(s) {
       '<div class="grow"><b style="font-size:15px">' + esc(s.name) +
       '<span class="badge-down">DOWN</span></b>' +
       '<div class="muted small">' + '<span style="white-space:nowrap">' + (s.type === 'xui' ? '3X-UI' : 'Marzban') + '</span>' + ' • ' + h.clients + ' clients</div></div>' +
+      '<button class="btn ghost sm srv-edit" onclick="event.stopPropagation();editServerFromDashboard(' + s.id + ')">Edit</button>' +
       '<div class="used"><span class="dot off"></span><div class="muted small" style="color:var(--red)">' + seen + '</div></div>' +
       '<button class="keybtn" style="background:transparent;color:var(--red);border:1px solid var(--red)" onclick="event.stopPropagation();retryServer(' + s.id + ', this)">Retry</button></div>';
   }
@@ -329,6 +330,7 @@ function serverRowHtml(s) {
     '<div class="flag">' + flagFor(s.country) + '</div>' +
     '<div class="grow"><b style="font-size:15px">' + esc(s.name) + badges + '</b>' +
     '<div class="muted small">' + sub + '</div></div>' +
+    '<button class="btn ghost sm srv-edit" onclick="event.stopPropagation();editServerFromDashboard(' + s.id + ')">Edit</button>' +
     '<div class="used"><span class="dot ' + dot + '"></span>' +
     (h && h.online ? '<div class="muted small">' + fmtGB(h.used) + '</div>' : '') + '</div>' +
     onlineHtml +
@@ -445,6 +447,11 @@ function countryGroupsHtml(servers, f, keyPrefix) {
       '<span class="gflag">' + flagFor(g === 'Other' ? '' : g) + '</span>' +
       '<b>' + esc(countryName(g)) + '</b>' +
       groupMetaHtml(items) +
+      // v6.1.10: "+" on every country-group header (admin only) —
+      // opens the add-server form with that country pre-filled.
+      // The raw country value (e.g. 'SG') is passed so the new
+      // server joins this same group instead of a duplicate one.
+      (IS_ADMIN ? '<button class="group-add" title="Add server in ' + esc(countryName(g)) + '" onclick="event.stopPropagation();addServerFromGroup(\'' + esc(g).replace(/'/g, "\\'") + '\')">+</button>' : '') +
       '<span class="chev chev-l2">' + chev + '</span></div>';
     if (collapsed) return html;
     html += items.map(serverRowHtml).join('');
@@ -608,15 +615,18 @@ function totalSectionsHtml() {
       secBodyHtml('total', which, list, total) + '</div>';
   }).join('');
 }
-/* Shared action buttons for a key row on the dashboard (Renew / Swap /
-   Edit / Copy link). Names are escaped for the inline onclick. */
+/* Shared action buttons for a key row on the dashboard (Outline /
+   Renew / Swap / Edit). v6.1.10: the link button is labelled
+   "Outline" (was "Copy link") and comes first, matching the
+   server-page key card's 3-column grid order. Names are escaped
+   for the inline onclick. */
 function keyRowActions(c) {
   const n = esc(c.name).replace(/'/g, "\\'");
   const proto = c.protocol || 'outline';
-  return '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + n + '\', \'' + proto + '\')">Renew</button>' +
+  return '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + n + '\', this, \'' + proto + '\')">Outline</button>' +
+    '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + n + '\', \'' + proto + '\')">Renew</button>' +
     '<button class="btn ghost sm" onclick="swapKey(' + c.server_id + ', \'' + n + '\', this, \'' + proto + '\')">Swap</button>' +
-    '<button class="btn ghost sm" onclick="openEditModal(' + c.server_id + ', \'' + n + '\', ' + Math.round((c.limit || 0) / 1073741824) + ', \'' + nameDateISO(c.name) + '\', \'' + proto + '\')">Edit</button>' +
-    '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + n + '\', this, \'' + proto + '\')">Copy link</button>';
+    '<button class="btn ghost sm" onclick="openEditModal(' + c.server_id + ', \'' + n + '\', ' + Math.round((c.limit || 0) / 1073741824) + ', \'' + nameDateISO(c.name) + '\', \'' + proto + '\')">Edit</button>';
 }
 function expiringRowHtml(c) {
   // v6.1.3: bulk-renew checkbox — same row, first child of .row.
@@ -663,9 +673,9 @@ function expiredRowHtml(c) {
     '<div class="muted small">' + esc(c.server_name) + ' • ' + reason + '</div></div>' +
     '<span class="status expired">expired</span></div>' +
     '<div class="actions">' +
+    '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this, \'' + proto + '\')">Outline</button>' +
     '<button class="btn ghost sm" onclick="openRenewModal(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', \'' + proto + '\')">Renew</button>' +
     '<button class="btn ghost sm" onclick="openEditModal(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', ' + Math.round((c.limit || 0) / 1073741824) + ', \'' + nameDateISO(c.name) + '\', \'' + proto + '\')">Edit</button>' +
-    '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this, \'' + proto + '\')">Copy link</button>' +
     '<button class="btn ghost sm red" onclick="deleteKey(' + c.server_id + ', \'' + esc(c.name).replace(/'/g, "\\'") + '\', this, \'' + proto + '\')">Delete</button>' +
     '</div></div>';
 }
@@ -964,14 +974,14 @@ function renderSearchResults() {
       return '<div class="card client" data-server="' + c.server_id + '" data-name="' + esc(c.name) +
       '" onclick="location.href=\'/server/' + c.server_id + '\'">' +
       '<div class="row"><div class="grow"><div class="name">' + esc(c.name) +
-      (proto === 'vless' || proto === 'both' ? '<span class="badge-vless">VLESS</span>' : '') +
       sharedBadgeHtml(c.server_id, proto, c.name) + '</div>' +
       '<div class="muted small">' + esc(c.server_name) + ' • ' + esc(c.used_h) + ' / ' + esc(c.limit_h) +
       ' • exp ' + esc(c.expiry_h) + '</div></div>' +
       '<span class="status ' + c.status + '">' + c.status + '</span>' +
       // v6.1.3: Copy on every search result — stopPropagation so the
-      // copy does not navigate to the server page.
-      '<button class="btn ghost sm" onclick="event.stopPropagation();copyLink(' + c.server_id + ', \'' + n + '\', this, \'' + proto + '\')">Copy</button></div></div>';
+      // copy does not navigate to the server page. v6.1.10: labelled
+      // "Outline" like the key card's main-link button.
+      '<button class="btn ghost sm" onclick="event.stopPropagation();copyLink(' + c.server_id + ', \'' + n + '\', this, \'' + proto + '\')">Outline</button></div></div>';
     }).join('');
 }
 async function checkSharingSearch(btn) {
@@ -1448,18 +1458,21 @@ function renderClients() {
       // usage line below, slim full-width bar, then the buttons.
       // v6.1.5: copy buttons per side — Outline link and/or WS +
       // XHTTP links; actions run on BOTH sides of a dual customer.
+      // v6.1.10: link buttons are labelled Outline / Vless-WS /
+      // Vless-XHTTP (user's exact words) and sit in the 3-column
+      // .actions grid: row 1 links, row 2 Renew/Swap/Disable,
+      // row 3 Edit/Delete. Behaviour unchanged.
       const copyBtns =
         (proto !== 'vless'
-          ? '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + n + '\', this)">Copy link</button>'
+          ? '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + n + '\', this)">Outline</button>'
           : '') +
         (proto !== 'outline'
-          ? '<button class="btn ghost sm" onclick="copyVlessLink(' + c.server_id + ', \'' + n + '\', \'ws\', this)">Copy WS link</button>' +
-            '<button class="btn ghost sm" onclick="copyVlessLink(' + c.server_id + ', \'' + n + '\', \'xhttp\', this)">Copy XHTTP link</button>'
+          ? '<button class="btn ghost sm" onclick="copyVlessLink(' + c.server_id + ', \'' + n + '\', \'ws\', this)">Vless-WS</button>' +
+            '<button class="btn ghost sm" onclick="copyVlessLink(' + c.server_id + ', \'' + n + '\', \'xhttp\', this)">Vless-XHTTP</button>'
           : '');
       return '<div class="card client' + (isExpiringToday(c) ? ' expiring-today' : '') + (isNew ? ' is-new' : '') + '">' +
       '<div class="row"><input type="checkbox" class="key-check" data-proto="' + proto + '" data-name="' + esc(c.name) + '"' + checked + ' onchange="toggleSelect(this)">' +
       '<div class="grow"><div class="name">' + esc(c.name) +
-      (proto !== 'outline' ? '<span class="badge-vless">VLESS</span>' : '') +
       (isNew ? '<span class="badge-new">NEW</span>' : '') +
       sharedBadgeHtml(c.server_id, proto, c.name) + '</div></div>' +
       '<div class="badges"><span class="status ' + c.status + '">' + c.status + '</span>' +
@@ -2068,6 +2081,31 @@ async function removeServer(id, name, btn) {
     toast('Remove failed: ' + e.message);
   }
   loadSettings();
+}
+/* v6.1.10: dashboard Edit button (server rows) — the Settings form
+   only exists on the Settings tab, so go there first, then fill the
+   form with the existing editServer() flow. editServer() reads the
+   server from the SERVERS global, which for a reseller holds only
+   their own servers, and the API enforces ownership server-side. */
+function editServerFromDashboard(id) {
+  goTab('/settings').then(() => {
+    if (document.getElementById('f-name')) editServer(id);
+  });
+}
+/* v6.1.10: "+" on a country-group header (admin only) — open the
+   Settings add-server form with that country pre-filled. The raw
+   country value (e.g. 'SG') is used so the new server joins the
+   same group instead of a duplicate display-name group. */
+function addServerFromGroup(country) {
+  goTab('/settings').then(() => {
+    const f = document.getElementById('f-country');
+    if (!f) return;
+    cancelEdit();
+    f.value = country;
+    window.scrollTo({top: document.getElementById('form-title').offsetTop - 10, behavior: 'smooth'});
+    const name = document.getElementById('f-name');
+    if (name) name.focus();
+  });
 }
 let EDITING_ID = null;
 function editServer(id) {
