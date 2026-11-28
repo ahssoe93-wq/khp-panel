@@ -238,6 +238,9 @@ function applyOverview(j) {
   setStat('stat-keys', (j.stats.active || 0).toLocaleString('en-US'));
   setStat('stat-expiring3', j.stats.expiring_3d || 0);
   setStat('stat-expired', j.stats.expired || 0);
+  // v6.1.3: keys connected right now (admin: all 54 servers;
+  // reseller: own servers only — the payload is already scoped).
+  setStat('stat-online', (j.stats.online || 0).toLocaleString('en-US'));
   renderServers(); // sections live inside the server list now
 }
 function initDashboard() {
@@ -354,7 +357,7 @@ function renderServers() {
     // a filter forces every group open so matches are always findable
     const collapsed = f ? false : !EXPANDED.has(g);
     const chev = collapsed ? '▼' : '▲';
-    let html = '<div class="group-h" data-group="' + esc(g) + '" onclick="toggleGroup(\'' + esc(g) + '\')">' +
+    let html = '<div class="group-h country" data-group="' + esc(g) + '" onclick="toggleGroup(\'' + esc(g) + '\')">' +
       '<span class="gflag">' + flagFor(g === 'Other' ? '' : g) + '</span>' +
       '<b>' + esc(countryName(g)) + '</b>' +
       groupMetaHtml(items) +
@@ -416,7 +419,7 @@ function countryGroupsHtml(servers, f, keyPrefix) {
     // a filter forces every group open so matches are always findable
     const collapsed = f ? false : !EXPANDED.has(key);
     const chev = collapsed ? '▼' : '▲';
-    let html = '<div class="group-h" data-group="' + esc(key) + '" onclick="toggleGroup(\'' + esc(key) + '\')">' +
+    let html = '<div class="group-h country" data-group="' + esc(key) + '" onclick="toggleGroup(\'' + esc(key) + '\')">' +
       '<span class="gflag">' + flagFor(g === 'Other' ? '' : g) + '</span>' +
       '<b>' + esc(countryName(g)) + '</b>' +
       groupMetaHtml(items) +
@@ -527,6 +530,15 @@ function secBodyHtml(owner, which, list, total) {
   // Delete selected above the rows, checkboxes on the rows. Expiring
   // / Low keys are still active, so they never get a delete bar.
   if (which === 'expired') body += expSelBarHtml(owner, list);
+  // v6.1.3: bulk renew on EXPIRING sections only — Select all +
+  // month picker + Renew selected above the rows, checkboxes on the
+  // rows. Expired / Low keys never get a renew bar.
+  if (which === 'exp3') body += renSelBarHtml(owner, list);
+  // v6.1.3: sharing check — one button per expanded section; it
+  // marks rows used from 3+ IPs with a SHARED? badge (see
+  // checkSharingSection). Lazy on purpose: the IP log is fetched
+  // only when asked, never on dashboard load.
+  body += '<div style="margin:2px 0 10px"><button class="btn ghost sm" onclick="checkSharingSection(\'' + esc(owner) + '\', \'' + which + '\', this)">Check sharing</button></div>';
   body += shown.map(m.row).join('');
   if (!all && list.length > 5) {
     body += '<button class="see-all" onclick="toggleOwnerSectionAll(\'' + esc(owner) + '\', \'' + which + '\', true)">See all ' + total + ' →</button>';
@@ -585,16 +597,26 @@ function keyRowActions(c) {
     '<button class="btn ghost sm" onclick="copyLink(' + c.server_id + ', \'' + n + '\', this, \'' + proto + '\')">Copy link</button>';
 }
 function expiringRowHtml(c) {
-  return '<div class="card client"><div class="row"><div class="grow">' +
-    '<div class="name">' + esc(c.name) + '</div>' +
+  // v6.1.3: bulk-renew checkbox — same row, first child of .row.
+  // The selection lives in REN_SEL (server|proto|name), so a key
+  // checked in its owner's section is checked in Total too.
+  const proto = c.protocol || 'outline';
+  const checked = REN_SEL.has(renSelKey(c.server_id, proto, c.name)) ? ' checked' : '';
+  return '<div class="card client"><div class="row">' +
+    '<input type="checkbox" class="key-check ren-sel" data-server="' + c.server_id +
+    '" data-proto="' + proto + '" data-name="' + esc(c.name) + '"' + checked +
+    ' onchange="toggleRenSel(this)">' +
+    '<div class="grow">' +
+    '<div class="name">' + esc(c.name) + sharedBadgeHtml(c.server_id, proto, c.name) + '</div>' +
     '<div class="muted small">' + esc(c.server_name) + ' • expires ' + esc(c.expiry_h) +
     ' • ' + c.days_left + ' day' + (c.days_left === 1 ? '' : 's') + ' left</div></div>' +
     '<span class="status ' + c.status + '">' + c.status + '</span></div>' +
     '<div class="actions">' + keyRowActions(c) + '</div></div>';
 }
 function lowGbRowHtml(c) {
+  const proto = c.protocol || 'outline';
   return '<div class="card client"><div class="row"><div class="grow">' +
-    '<div class="name">' + esc(c.name) + '</div>' +
+    '<div class="name">' + esc(c.name) + sharedBadgeHtml(c.server_id, proto, c.name) + '</div>' +
     '<div class="muted small">' + esc(c.server_name) + ' • ' + esc(c.remaining_h) + ' left of ' + esc(c.limit_h) +
     ' • exp ' + esc(c.expiry_h) + '</div></div>' +
     '<span class="status ' + c.status + '">' + c.status + '</span></div>' +
@@ -615,7 +637,7 @@ function expiredRowHtml(c) {
     '" data-proto="' + proto + '" data-name="' + esc(c.name) + '"' + checked +
     ' onchange="toggleExpSel(this)">' +
     '<div class="grow">' +
-    '<div class="name">' + esc(c.name) + '</div>' +
+    '<div class="name">' + esc(c.name) + sharedBadgeHtml(c.server_id, proto, c.name) + '</div>' +
     '<div class="muted small">' + esc(c.server_name) + ' • ' + reason + '</div></div>' +
     '<span class="status expired">expired</span></div>' +
     '<div class="actions">' +
@@ -722,22 +744,248 @@ async function deleteExpiredSelected(owner, btn) {
     toast('Deleted ' + deleted + ' expired keys' + (failed.length ? ' • ' + failed.length + ' failed' : ''));
   });
 }
+/* v6.1.3: bulk renew in EXPIRING sections (Total Expiring, MY
+   SERVERS' Expiring, each channel's Expiring, each reseller's own
+   Expiring). Same selection model as the expired-section bulk delete:
+   "serverId|proto|name" in REN_SEL, shared across sections; Select
+   all takes the section's whole LISTED set (capped at 100) and
+   expands the section so every selected row is visible. A month
+   picker (1/2/3) sits next to the button; the two-click confirm
+   shows the count AND the months. Renewal reuses the existing
+   per-server /bulk-renew-key endpoint, grouped by server. Only
+   expiring keys get this — expired / low-GB keys never do. */
+let REN_SEL = new Set();
+function renSelKey(serverId, proto, name) { return serverId + '|' + proto + '|' + name; }
+function expiringSectionList(owner) {
+  // the listed expiring keys for one section ('total' or an owner)
+  if (owner === 'total') return OV_TOTAL ? (OV_TOTAL.expiring || []) : [];
+  const o = OV_BY_OWNER[owner];
+  return o ? (o.expiring || []) : [];
+}
+function renSelBarHtml(owner, list) {
+  const n = list.filter(c => REN_SEL.has(renSelKey(c.server_id, c.protocol || 'outline', c.name))).length;
+  const allChecked = list.length > 0 && n === list.length;
+  return '<div class="sel-bar ren-sel-bar" data-owner="' + esc(owner) + '">' +
+    '<label class="sel-all"><input type="checkbox"' + (allChecked ? ' checked' : '') +
+    ' onchange="toggleRenSelAll(\'' + esc(owner) + '\', this.checked)"> <span>Select all (' + list.length + ')</span></label>' +
+    '<select class="ren-month" aria-label="Months to renew">' +
+    '<option value="1">+1 mo</option><option value="2">+2 mo</option><option value="3">+3 mo</option></select>' +
+    '<button class="btn sm" style="display:' + (n ? '' : 'none') + '" onclick="renewExpiringSelected(\'' + esc(owner) + '\', this)">Renew selected (' + n + ')</button></div>';
+}
+function toggleRenSel(cb) {
+  const k = renSelKey(cb.dataset.server, cb.dataset.proto, cb.dataset.name);
+  if (cb.checked) REN_SEL.add(k); else REN_SEL.delete(k);
+  updateRenSelBars();
+}
+function toggleRenSelAll(owner, checked) {
+  const list = expiringSectionList(owner);
+  // selecting all also expands the section, so every selected row is
+  // visible (the preview shows only 5).
+  SEC_ALL.add(secKey(owner, 'exp3'));
+  list.forEach(c => {
+    const k = renSelKey(c.server_id, c.protocol || 'outline', c.name);
+    if (checked) REN_SEL.add(k); else REN_SEL.delete(k);
+  });
+  renderServers();
+  updateRenSelBars();
+}
+function updateRenSelBars() {
+  // in-place refresh of every expiring-section bar (no full re-render):
+  // Select-all checkbox state, Renew button visibility + count — and
+  // every expiring-row checkbox, so a key checked in Total is checked
+  // in its owner's section too (same REN_SEL entry).
+  document.querySelectorAll('.ren-sel').forEach(cb => {
+    cb.checked = REN_SEL.has(renSelKey(cb.dataset.server, cb.dataset.proto, cb.dataset.name));
+  });
+  document.querySelectorAll('.owner-sec-list[data-which="exp3"]').forEach(div => {
+    const owner = div.dataset.owner;
+    const list = expiringSectionList(owner);
+    const n = list.filter(c => REN_SEL.has(renSelKey(c.server_id, c.protocol || 'outline', c.name))).length;
+    const bar = div.querySelector('.ren-sel-bar');
+    if (!bar) return;
+    const cb = bar.querySelector('input[type="checkbox"]');
+    if (cb) cb.checked = list.length > 0 && n === list.length;
+    const btn = bar.querySelector('button');
+    if (btn) {
+      btn.style.display = n ? '' : 'none';
+      btn.textContent = 'Renew selected (' + n + ')';
+    }
+  });
+}
+async function renewExpiringSelected(owner, btn) {
+  const list = expiringSectionList(owner);
+  const items = list.filter(c => REN_SEL.has(renSelKey(c.server_id, c.protocol || 'outline', c.name)));
+  if (!items.length) return;
+  const bar = btn.closest('.ren-sel-bar');
+  const months = parseInt((bar && bar.querySelector('.ren-month') || {}).value || '1', 10) || 1;
+  const byServer = {};
+  items.forEach(c => {
+    (byServer[c.server_id] = byServer[c.server_id] || []).push(
+      {name: c.name, protocol: c.protocol || 'outline'});
+  });
+  // two-click confirm showing the count AND the months — never renew
+  // without it (same pattern as the server-page bulk delete).
+  armOrRun('exp-ren:' + owner + ':' + items.length + ':' + months, btn,
+    'Renew ' + items.length + ' keys +' + months + ' mo?', async () => {
+    let renewed = 0; const failed = [];
+    for (const serverId of Object.keys(byServer)) {
+      try {
+        const j = await api('/api/server/' + serverId + '/bulk-renew-key', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({items: byServer[serverId], months})});
+        (j.renewed || []).forEach(r => {
+          const proto = (byServer[serverId].find(i => i.name === r.old_name) || {}).protocol || 'outline';
+          REN_SEL.delete(renSelKey(serverId, proto, r.old_name));
+          // the key is RENAMED to the new date and its expiry moves
+          // out of the 3-day window, so applyKeyPatch drops the row
+          // from the expiring lists and decrements the totals.
+          applyKeyPatch(parseInt(serverId, 10), r.old_name,
+            {name: r.name, expiry: r.expiry, expiry_h: r.expiry_h,
+             limit: (r.gb || 0) * 1073741824}, true);
+          renewed++;
+        });
+        (j.failed || []).forEach(f => failed.push(f.name));
+      } catch (e) { byServer[serverId].forEach(i => failed.push(i.name)); }
+    }
+    // one re-render for the whole batch (applyKeyPatch was deferred)
+    renderServers();
+    updateRenSelBars();
+    toast('Renewed ' + renewed + ' keys +' + months + ' mo' + (failed.length ? ' • ' + failed.length + ' failed' : ''));
+  });
+}
+/* v6.1.3: key-sharing flag. SHARED_MAP is "serverId|proto|name" ->
+   distinct-IP count, filled ONLY by an explicit check (server page,
+   section, or search) and cached for the session — the IP log is
+   never fetched on load. 2 phones is normal (the owner's 2-phone
+   policy), so only 3+ distinct IPs get the badge. */
+let SHARED_MAP = {};
+function sharedKey(serverId, proto, name) { return serverId + '|' + (proto || 'outline') + '|' + name; }
+function sharedBadgeHtml(serverId, proto, name) {
+  const n = SHARED_MAP[sharedKey(serverId, proto, name)];
+  if (n == null || n < 3) return '';
+  return '<span class="badge-shared" title="used from ' + n + ' different IPs">SHARED? (' + n + ' IPs)</span>';
+}
+async function checkSharing(serverId, items) {
+  // items: [{name, protocol}] (max 100). Returns true when the check
+  // ran, false when the server cannot report IPs (Marzban).
+  const todo = items.filter(it => !(sharedKey(serverId, it.protocol || 'outline', it.name) in SHARED_MAP));
+  if (!todo.length) return true;
+  const names = todo.slice(0, 100).map(it => it.name);
+  const j = await api('/api/server/' + serverId + '/key-ips', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({names})});
+  if (!j.supported) { toast('IP log not available on Marzban servers'); return false; }
+  todo.forEach(it => {
+    const n = (j.counts || {})[it.name];
+    if (typeof n === 'number') SHARED_MAP[sharedKey(serverId, it.protocol || 'outline', it.name)] = n;
+  });
+  return true;
+}
+async function checkSharingSection(owner, which, btn) {
+  const list = which === 'exp3' ? expiringSectionList(owner)
+    : which === 'lowgb' ? ((owner === 'total' ? OV_TOTAL : OV_BY_OWNER[owner]) || {}).low_gb || []
+    : expSectionList(owner);
+  if (!list.length) { toast('No keys in this section'); return; }
+  btn.disabled = true; btn.textContent = 'Checking…';
+  try {
+    const byServer = {};
+    list.forEach(c => {
+      (byServer[c.server_id] = byServer[c.server_id] || []).push(
+        {name: c.name, protocol: c.protocol || 'outline'});
+    });
+    let checked = 0, shared = 0;
+    for (const serverId of Object.keys(byServer)) {
+      const ok = await checkSharing(parseInt(serverId, 10), byServer[serverId]);
+      if (!ok) { btn.disabled = false; btn.textContent = 'Check sharing'; return; }
+      checked += byServer[serverId].length;
+    }
+    list.forEach(c => {
+      const n = SHARED_MAP[sharedKey(c.server_id, c.protocol || 'outline', c.name)];
+      if (n != null && n >= 3) shared++;
+    });
+    renderServers();
+    toast('Checked ' + checked + ' keys • ' + shared + ' shared (3+ IPs)');
+  } catch (e) { toast('Sharing check failed: ' + e.message); }
+  btn.disabled = false; btn.textContent = 'Check sharing';
+}
+async function checkSharedServerPage(btn) {
+  // checks the currently-filtered keys on this server page (both
+  // protocols, capped at 100) and marks shared rows with a badge.
+  const items = selFiltered().slice(0, 100);
+  if (!items.length) { toast('No keys to check'); return; }
+  btn.disabled = true; btn.textContent = 'Checking…';
+  try {
+    const ok = await checkSharing(SERVER_ID, items);
+    if (ok) {
+      const shared = items.filter(it =>
+        (SHARED_MAP[sharedKey(SERVER_ID, it.protocol, it.name)] || 0) >= 3).length;
+      renderClients();
+      renderVlessClients();
+      toast('Checked ' + items.length + ' keys • ' + shared + ' shared (3+ IPs)');
+    }
+  } catch (e) { toast('Sharing check failed: ' + e.message); }
+  btn.disabled = false; btn.textContent = 'Check shared';
+}
+function exportServerKeys() {
+  // v6.1.3: CSV backup of ALL keys on this server — a plain GET
+  // download (the endpoint enforces ownership server-side).
+  window.location.href = '/api/server/' + SERVER_ID + '/export';
+}
+let LAST_SEARCH = [];
+function renderSearchResults() {
+  const el = document.getElementById('search-results');
+  if (!LAST_SEARCH.length) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div style="margin:2px 0 10px"><button class="btn ghost sm" onclick="checkSharingSearch(this)">Check sharing</button></div>' +
+    LAST_SEARCH.map(c => {
+      const n = esc(c.name).replace(/'/g, "\\'");
+      const proto = c.protocol || 'outline';
+      return '<div class="card client" data-server="' + c.server_id + '" data-name="' + esc(c.name) +
+      '" onclick="location.href=\'/server/' + c.server_id + '\'">' +
+      '<div class="row"><div class="grow"><div class="name">' + esc(c.name) +
+      (proto === 'vless' ? '<span class="badge-vless">VLESS</span>' : '') +
+      sharedBadgeHtml(c.server_id, proto, c.name) + '</div>' +
+      '<div class="muted small">' + esc(c.server_name) + ' • ' + esc(c.used_h) + ' / ' + esc(c.limit_h) +
+      ' • exp ' + esc(c.expiry_h) + '</div></div>' +
+      '<span class="status ' + c.status + '">' + c.status + '</span>' +
+      // v6.1.3: Copy on every search result — stopPropagation so the
+      // copy does not navigate to the server page.
+      '<button class="btn ghost sm" onclick="event.stopPropagation();copyLink(' + c.server_id + ', \'' + n + '\', this, \'' + proto + '\')">Copy</button></div></div>';
+    }).join('');
+}
+async function checkSharingSearch(btn) {
+  if (!LAST_SEARCH.length) return;
+  btn.disabled = true; btn.textContent = 'Checking…';
+  try {
+    const byServer = {};
+    LAST_SEARCH.forEach(c => {
+      (byServer[c.server_id] = byServer[c.server_id] || []).push(
+        {name: c.name, protocol: c.protocol || 'outline'});
+    });
+    let checked = 0, shared = 0;
+    for (const serverId of Object.keys(byServer)) {
+      const ok = await checkSharing(parseInt(serverId, 10), byServer[serverId]);
+      if (!ok) { btn.disabled = false; btn.textContent = 'Check sharing'; return; }
+      checked += byServer[serverId].length;
+    }
+    LAST_SEARCH.forEach(c => {
+      const n = SHARED_MAP[sharedKey(c.server_id, c.protocol || 'outline', c.name)];
+      if (n != null && n >= 3) shared++;
+    });
+    renderSearchResults();
+    toast('Checked ' + checked + ' keys • ' + shared + ' shared (3+ IPs)');
+  } catch (e) { toast('Sharing check failed: ' + e.message); }
+  btn.disabled = false; btn.textContent = 'Check sharing';
+}
 async function globalSearch() {
   const q = document.getElementById('q').value.trim();
   const el = document.getElementById('search-results');
-  if (q.length < 2) { el.innerHTML = ''; return; }
+  if (q.length < 2) { LAST_SEARCH = []; el.innerHTML = ''; return; }
   el.innerHTML = '<div class="spin">Searching all servers…</div>';
   try {
     const j = await api('/api/search?q=' + encodeURIComponent(q));
-    if (!j.results.length) { el.innerHTML = '<div class="empty">No key found for “' + esc(q) + '” on any server.</div>'; return; }
-    el.innerHTML = j.results.map(c =>
-      '<div class="card client" onclick="location.href=\'/server/' + c.server_id + '\'">' +
-      '<div class="row"><div class="grow"><div class="name">' + esc(c.name) +
-      (c.protocol === 'vless' ? '<span class="badge-vless">VLESS</span>' : '') + '</div>' +
-      '<div class="muted small">' + esc(c.server_name) + ' • ' + esc(c.used_h) + ' / ' + esc(c.limit_h) +
-      ' • exp ' + esc(c.expiry_h) + '</div></div>' +
-      '<span class="status ' + c.status + '">' + c.status + '</span></div></div>'
-    ).join('');
+    if (!j.results.length) { LAST_SEARCH = []; el.innerHTML = '<div class="empty">No key found for “' + esc(q) + '” on any server.</div>'; return; }
+    LAST_SEARCH = j.results;
+    renderSearchResults();
   } catch (e) {
     el.innerHTML = '<div class="error">Search failed: ' + esc(e.message) + '</div>';
   }
@@ -983,7 +1231,8 @@ function renderVlessClients() {
       return '<div class="card client' + (isExpiringToday(c) ? ' expiring-today' : '') + (isNew ? ' is-new' : '') + '">' +
       '<div class="row"><input type="checkbox" class="key-check" data-proto="vless" data-name="' + esc(c.name) + '"' + checked + ' onchange="toggleSelect(this)">' +
       '<div class="grow"><div class="name">' + esc(c.name) +
-      '<span class="badge-vless">VLESS</span>' + (isNew ? '<span class="badge-new">NEW</span>' : '') + '</div></div>' +
+      '<span class="badge-vless">VLESS</span>' + (isNew ? '<span class="badge-new">NEW</span>' : '') +
+      sharedBadgeHtml(c.server_id, 'vless', c.name) + '</div></div>' +
       '<div class="badges"><span class="status ' + c.status + '">' + c.status + '</span>' +
       onlinePillHtml(c) + '</div></div>' +
       '<div class="muted small" style="margin-top:4px">' + esc(c.used_h) + ' / ' + esc(c.limit_h) + ' • exp ' + esc(c.expiry_h) + '</div>' +
@@ -1225,7 +1474,8 @@ function renderClients() {
       return '<div class="card client' + (isExpiringToday(c) ? ' expiring-today' : '') + (isNew ? ' is-new' : '') + '">' +
       '<div class="row"><input type="checkbox" class="key-check" data-proto="outline" data-name="' + esc(c.name) + '"' + checked + ' onchange="toggleSelect(this)">' +
       '<div class="grow"><div class="name">' + esc(c.name) +
-      (isNew ? '<span class="badge-new">NEW</span>' : '') + '</div></div>' +
+      (isNew ? '<span class="badge-new">NEW</span>' : '') +
+      sharedBadgeHtml(c.server_id, 'outline', c.name) + '</div></div>' +
       '<div class="badges"><span class="status ' + c.status + '">' + c.status + '</span>' +
       onlinePillHtml(c) + '</div></div>' +
       '<div class="muted small" style="margin-top:4px">' + esc(c.used_h) + ' / ' + esc(c.limit_h) + ' • exp ' + esc(c.expiry_h) + '</div>' +
