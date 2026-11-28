@@ -569,18 +569,12 @@ def server_clients(server):
 
 def server_all_clients(server):
     """Outline + VLESS clients (3X-UI) or Marzban users, normalised.
-    VLESS entries carry protocol='vless' + uuid and are deduped by UUID;
-    Outline entries carry protocol='outline'."""
+    v6.1.5: 3X-UI returns ONE record per customer (email) — a dual
+    Outline+VLESS customer is protocol='both' with both sub-records;
+    Outline-only / VLESS-only stay protocol='outline' / 'vless'."""
     client = make_client(server)
     if server["type"] == "xui":
-        out = []
-        for c in client.list_clients():
-            c["protocol"] = "outline"
-            out.append(c)
-        for c in client.list_vless_clients():
-            c["protocol"] = "vless"
-            out.append(c)
-        return out
+        return client.list_merged_clients()
     return client.list_users()
 
 
@@ -603,8 +597,12 @@ def public_client(server_id, c, created=None):
         # v4: unix time this panel created the key (0 = created elsewhere
         # or before v4); drives the "Newest" sort and the NEW badge.
         "created_at": created or 0,
-        # v6: which protocol this key is (outline / vless).
+        # v6: which protocol this key is (outline / vless / both).
+        # v6.1.5: "both" = one customer holding an Outline key AND a
+        # VLESS key; "protocols" lists the sides present.
         "protocol": c.get("protocol", "outline"),
+        "protocols": c.get("protocols",
+                           [c.get("protocol", "outline")]),
     }
     # v6.1: online is included ONLY when the panel actually supplied it
     # (3X-UI onlines endpoint, or Marzban online_at). Absent = unknown,
@@ -653,7 +651,10 @@ def api_clients(server_id):
     try:
         client = make_client(server)
         if server["type"] == "xui":
-            clients = client.list_clients()
+            # v6.1.5: ONE row per customer (email) — dual Outline+VLESS
+            # customers come back as a single protocol='both' record
+            # carrying both links; VLESS-only as protocol='vless'.
+            clients = client.list_merged_clients()
             # v6.1: one extra POST for the currently-connected list; a
             # failed read returns None and the pill is omitted (never
             # "everyone Offline"). Marzban users already carry "online"
@@ -798,7 +799,8 @@ def api_delete_key(server_id):
     try:
         client = make_client(server)
         if server["type"] == "xui":
-            client.delete_client(name)
+            # v6.1.5: deletes BOTH sides of a dual customer.
+            client.delete_merged_client(name)
         else:
             client.delete_user(name)
     except Exception as exc:  # noqa: BLE001
@@ -812,6 +814,25 @@ def api_delete_key(server_id):
 # ---------------------------------------------------------------- key actions (v2)
 def _key_action_server(server_id):
     return _owned_server(server_id)
+
+
+def _merged_links(client, rec):
+    """v6.1.5: (link, links) for a merged 3X-UI record — the Outline
+    ss:// link first; the VLESS links dict when a VLESS side exists
+    (else None). A VLESS-only record's link is its WS primary link."""
+    links = None
+    if rec.get("vless"):
+        try:
+            links = client.build_vless_links(rec["vless"])
+        except Exception:  # noqa: BLE001
+            links = None
+    if rec.get("outline"):
+        link = client.build_link(rec["outline"])
+    elif links:
+        link = links.get("primary") or ""
+    else:
+        link = ""
+    return link, links
 
 
 @app.route("/api/server/<int:server_id>/clients/<path:name>/renew",
@@ -831,23 +852,33 @@ def api_renew_key(server_id, name):
     try:
         client = make_client(server)
         if server["type"] == "xui":
-            rec, new_name = client.renew_client(name, months)
+            # v6.1.5: renews BOTH sides of a dual customer (same new
+            # name + expiry); a single-protocol customer renews its
+            # one side.
+            rec, new_name = client.renew_merged_client(name, months)
+            link, links = _merged_links(client, rec)
         else:
             rec, new_name = client.renew_user(name, months)
-        link = client.build_link(rec)
+            link = client.build_link(rec)
+            links = None
     except Exception as exc:  # noqa: BLE001
         return jsonify({"ok": False, "error": str(exc)[:300]}), 502
     if new_name != name:
         note_key_renamed(server_id, name, new_name)
     HEALTH_CACHE.pop(server_id, None)
-    return jsonify({"ok": True, "old_name": name, "name": new_name,
-                    "link": link,
-                    "expiry": rec.get("expiry") or 0,
-                    "expiry_h": (datetime.fromtimestamp(rec["expiry"], MM)
-                                 .strftime("%d %b %Y") if rec.get("expiry")
-                                 else "never"),
-                    "gb": int((rec.get("limit") or 0) // 1073741824),
-                    "months": months})
+    resp = {"ok": True, "old_name": name, "name": new_name,
+            "link": link,
+            "expiry": rec.get("expiry") or 0,
+            "expiry_h": (datetime.fromtimestamp(rec["expiry"], MM)
+                         .strftime("%d %b %Y") if rec.get("expiry")
+                         else "never"),
+            "gb": int((rec.get("limit") or 0) // 1073741824),
+            "months": months}
+    if links:
+        resp["links"] = links
+    if server["type"] == "xui":
+        resp["protocol"] = rec.get("protocol", "outline")
+    return jsonify(resp)
 
 
 @app.route("/api/server/<int:server_id>/clients/<path:name>/swap",
@@ -863,19 +894,28 @@ def api_swap_key(server_id, name):
     try:
         client = make_client(server)
         if server["type"] == "xui":
-            rec = client.swap_client(name)
+            # v6.1.5: swaps BOTH sides of a dual customer (fresh
+            # Outline password + fresh VLESS UUID).
+            rec = client.swap_merged_client(name)
+            link, links = _merged_links(client, rec)
         else:
             rec = client.swap_user(name)
-        link = client.build_link(rec)
+            link = client.build_link(rec)
+            links = None
     except Exception as exc:  # noqa: BLE001
         return jsonify({"ok": False, "error": str(exc)[:300]}), 502
     # Swap = delete + fresh create, so it is a NEW key: fresh created_at.
     note_key_created(server_id, name)
     HEALTH_CACHE.pop(server_id, None)
-    return jsonify({"ok": True, "name": name, "link": link,
-                    "expiry": rec.get("expiry") or 0,
-                    "limit": rec.get("limit") or 0,
-                    "created_at": int(time.time())})
+    resp = {"ok": True, "name": name, "link": link,
+            "expiry": rec.get("expiry") or 0,
+            "limit": rec.get("limit") or 0,
+            "created_at": int(time.time())}
+    if links:
+        resp["links"] = links
+    if server["type"] == "xui":
+        resp["protocol"] = rec.get("protocol", "outline")
+    return jsonify(resp)
 
 
 @app.route("/api/server/<int:server_id>/clients/<path:name>/toggle",
@@ -891,7 +931,8 @@ def api_toggle_key(server_id, name):
     try:
         client = make_client(server)
         if server["type"] == "xui":
-            rec = client.toggle_client(name, enable)
+            # v6.1.5: toggles BOTH sides of a dual customer.
+            rec = client.toggle_merged_client(name, enable)
         else:
             rec = client.toggle_user(name, enable)
     except Exception as exc:  # noqa: BLE001
@@ -920,7 +961,8 @@ def api_gb_key(server_id, name):
     try:
         client = make_client(server)
         if server["type"] == "xui":
-            rec = client.set_gb_client(name, GB_BYTES[gb])
+            # v6.1.5: sets the GB limit on BOTH sides of a dual customer.
+            rec = client.set_gb_merged_client(name, GB_BYTES[gb])
         else:
             rec = client.set_gb_user(name, GB_BYTES[gb])
     except Exception as exc:  # noqa: BLE001
@@ -966,22 +1008,32 @@ def api_edit_key(server_id, name):
         client = make_client(server)
         gb_bytes = int(gb * 1073741824) if gb is not None else None
         if server["type"] == "xui":
-            rec, new_name = client.edit_client(name, gb_bytes, new_date)
+            # v6.1.5: edits BOTH sides of a dual customer (a date
+            # change renames both records to the same new date).
+            rec, new_name = client.edit_merged_client(name, gb_bytes,
+                                                      new_date)
+            link, links = _merged_links(client, rec)
         else:
             rec, new_name = client.edit_user(name, gb_bytes, new_date)
-        link = client.build_link(rec)
+            link = client.build_link(rec)
+            links = None
     except Exception as exc:  # noqa: BLE001
         return jsonify({"ok": False, "error": str(exc)[:300]}), 502
     if new_name != name:
         note_key_renamed(server_id, name, new_name)
     HEALTH_CACHE.pop(server_id, None)
-    return jsonify({"ok": True, "old_name": name, "name": new_name,
-                    "link": link,
-                    "expiry": rec.get("expiry") or 0,
-                    "expiry_h": (datetime.fromtimestamp(rec["expiry"], MM)
-                                 .strftime("%d %b %Y") if rec.get("expiry")
-                                 else "never"),
-                    "gb": int((rec.get("limit") or 0) // 1073741824)})
+    resp = {"ok": True, "old_name": name, "name": new_name,
+            "link": link,
+            "expiry": rec.get("expiry") or 0,
+            "expiry_h": (datetime.fromtimestamp(rec["expiry"], MM)
+                         .strftime("%d %b %Y") if rec.get("expiry")
+                         else "never"),
+            "gb": int((rec.get("limit") or 0) // 1073741824)}
+    if links:
+        resp["links"] = links
+    if server["type"] == "xui":
+        resp["protocol"] = rec.get("protocol", "outline")
+    return jsonify(resp)
 
 
 def _parse_ss_link(q):
@@ -1172,13 +1224,10 @@ def api_key_overview():
         try:
             client = make_client(full)
             if full["type"] == "xui":
-                clients = []
-                for c in client.list_clients():
-                    c["protocol"] = "outline"
-                    clients.append(c)
-                for c in client.list_vless_clients():
-                    c["protocol"] = "vless"
-                    clients.append(c)
+                # v6.1.5: ONE record per customer (email) — a dual
+                # Outline+VLESS customer counts once in every total
+                # below (total/active/expiring/expired/low/online).
+                clients = client.list_merged_clients()
                 try:
                     online = client.online_emails()
                 except Exception:  # noqa: BLE001
@@ -1619,11 +1668,12 @@ def api_bulk_add_key(server_id):
 @app.route("/api/server/<int:server_id>/bulk-delete-key", methods=["POST"])
 @login_required
 def api_bulk_delete_key(server_id):
-    """Delete several keys at once. Body: {"items": [{"name": ..., 
-    "protocol": "outline"|"vless"}]} (protocol defaults to outline;
-    Marzban servers ignore it). The UI always asks for confirmation
-    with the count before calling this. Per-key failures are reported
-    in "failed" — the rest still delete."""
+    """Delete several keys at once. Body: {"items": [{"name": ...,
+    "protocol": "outline"|"vless"|"both"}]} (protocol defaults to
+    outline; Marzban servers ignore it). v6.1.5: protocol "both"
+    deletes BOTH sides of a dual customer. The UI always asks for
+    confirmation with the count before calling this. Per-key failures
+    are reported in "failed" — the rest still delete."""
     server, err = _owned_server(server_id)
     if err:
         return err
@@ -1651,6 +1701,8 @@ def api_bulk_delete_key(server_id):
                 client.delete_user(name)
             elif proto == "vless":
                 client.delete_vless_client(name)
+            elif proto == "both":
+                client.delete_merged_client(name)
             else:
                 client.delete_client(name)
             note_key_deleted(server_id, name)
@@ -1666,8 +1718,9 @@ def api_bulk_delete_key(server_id):
 @login_required
 def api_bulk_renew_key(server_id):
     """v6.1.3: renew several EXPIRING keys at once. Body:
-    {"items": [{"name": ..., "protocol": "outline"|"vless"}],
-    "months": 1|2|3}. Reuses the single-renew semantics per key (new
+    {"items": [{"name": ..., "protocol": "outline"|"vless"|"both"}],
+    "months": 1|2|3}. v6.1.5: protocol "both" renews BOTH sides of a
+    dual customer. Reuses the single-renew semantics per key (new
     expiry = old + 30/60/90 days, key RENAMED to the new date, GB
     unchanged; Marzban renew = DELETE+RECREATE). The UI asks for
     confirmation with the count + months before calling this.
@@ -1704,6 +1757,8 @@ def api_bulk_renew_key(server_id):
                 rec, new_name = client.renew_user(name, months)
             elif proto == "vless":
                 rec, new_name = client.renew_vless_client(name, months)
+            elif proto == "both":
+                rec, new_name = client.renew_merged_client(name, months)
             else:
                 rec, new_name = client.renew_client(name, months)
             if new_name != name:
@@ -1768,11 +1823,14 @@ def api_key_ips(server_id):
 @login_required
 def api_export_server(server_id):
     """v6.1.3: download ALL keys on one server as CSV (backup).
-    Columns: name, link, expiry, gb_limit, used_gb, status. UTF-8
-    with BOM so Excel opens it correctly. Ownership is enforced by
-    _owned_server (admin: any server; reseller: own servers only).
-    A row whose link cannot be built (no password on record) is
-    still listed, with an empty link."""
+    Columns: name, link, vless_link, expiry, gb_limit, used_gb,
+    status. v6.1.5: one row per customer (dual customers used to
+    appear twice); their VLESS link goes in the vless_link column so
+    the backup loses no key. UTF-8 with BOM so Excel opens it
+    correctly. Ownership is enforced by _owned_server (admin: any
+    server; reseller: own servers only). A row whose link cannot be
+    built (no password on record) is still listed, with an empty
+    link."""
     server, err = _owned_server(server_id)
     if err:
         return err
@@ -1783,18 +1841,23 @@ def api_export_server(server_id):
         return jsonify({"ok": False, "error": str(exc)[:300]}), 502
     rows = []
     for c in clients:
+        link, vlink = "", ""
         try:
             if c.get("protocol") == "vless":
                 links = client.build_vless_links(c)
                 link = links.get("primary") or links.get("ws") or ""
             else:
                 link = client.build_link(c)
+                if c.get("vless"):
+                    vlinks = client.build_vless_links(c["vless"])
+                    vlink = vlinks.get("primary") or vlinks.get("ws") or ""
         except Exception:  # noqa: BLE001
-            link = ""
+            pass
         exp = c.get("expiry") or 0
         rows.append([
             c.get("name", ""),
             link,
+            vlink,
             (datetime.fromtimestamp(exp, MM).strftime("%Y-%m-%d")
              if exp else "never"),
             str(int((c.get("limit") or 0) // 1073741824)),
@@ -1804,7 +1867,8 @@ def api_export_server(server_id):
     buf = io.StringIO()
     buf.write("\ufeff")  # BOM — Excel needs it to read UTF-8
     w = csv.writer(buf)
-    w.writerow(["name", "link", "expiry", "gb_limit", "used_gb", "status"])
+    w.writerow(["name", "link", "vless_link", "expiry", "gb_limit",
+                "used_gb", "status"])
     w.writerows(rows)
     safe = "".join(ch for ch in server["name"]
                    if ch.isalnum() or ch in "_-") or "server"
