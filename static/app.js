@@ -57,6 +57,11 @@ let OV_BY_OWNER = {};
 let OV_TOTAL = null;
 let OV_STATS = null, OVERVIEW_LOADED = false;
 let EXP_COUNTS = {};
+// v6.1.4: per-server online counts from /api/key-overview
+// (server_id -> N online now, or null when that server's scan
+// failed). Null/missing = unknown — the row shows no count, never
+// a fake number. Refreshed with the overview every 60s.
+let OV_PER_SERVER_ONLINE = null;
 // v6.1.1: the three key sections are per-owner now (MY SERVERS / one
 // channel / a reseller's own servers). Each starts COLLAPSED; the
 // choice is remembered on this device, per owner + section.
@@ -227,6 +232,8 @@ function applyOverview(j) {
   OV_STATS = j.stats || null;
   OV_BY_OWNER = j.by_owner || {};
   OV_TOTAL = j.total || null;
+  // v6.1.4: per-server online counts (same scan as the strip).
+  OV_PER_SERVER_ONLINE = j.per_server_online || null;
   EXP_COUNTS = {};
   Object.values(OV_BY_OWNER).forEach(o => {
     (o.expiring || []).forEach(c => { EXP_COUNTS[c.server_id] = (EXP_COUNTS[c.server_id] || 0) + 1; });
@@ -305,12 +312,23 @@ function serverRowHtml(s) {
   const pct = (h && h.online && h.limit) ? Math.min(100, Math.round(h.used * 100 / h.limit)) : 0;
   const bar = (h && h.online && h.limit)
     ? '<div class="serverbar"><i style="width:' + pct + '%"></i></div>' : '';
+  // v6.1.4: per-server online count on the row's right, next to the
+  // grey chevron — same live source as the Total online strip.
+  // Shown only when the overview has loaded AND this server's scan
+  // succeeded; unknown is omitted, never a fake number. The DOWN
+  // branch above never shows it (the row shows DOWN + last seen).
+  const pso = OV_PER_SERVER_ONLINE ? OV_PER_SERVER_ONLINE[s.id] : null;
+  const onlineHtml = (h && h.online && pso != null)
+    ? '<div class="srv-online"><div class="n"><span class="dot on"></span>' +
+      pso + ' online</div><div class="lbl">of ' + h.clients + ' keys</div></div>'
+    : '';
   return '<div class="server" onclick="location.href=\'/server/' + s.id + '\'">' +
     '<div class="flag">' + flagFor(s.country) + '</div>' +
     '<div class="grow"><b style="font-size:18px">' + esc(s.name) + badges + '</b>' +
     '<div class="muted small">' + sub + '</div></div>' +
     '<div class="used"><span class="dot ' + dot + '"></span>' +
     (h && h.online ? '<div class="muted small">' + fmtGB(h.used) + '</div>' : '') + '</div>' +
+    onlineHtml +
     '<button class="keybtn" onclick="event.stopPropagation();location.href=\'/server/' + s.id + '#add\'">+ Key</button>' +
     '<span class="chev chev-l3">›</span>' + bar + '</div>';
 }
